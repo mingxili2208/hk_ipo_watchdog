@@ -1,5 +1,7 @@
 """LLM 客户端 — 统一接口。"""
 
+from collections.abc import Callable
+
 from loguru import logger
 
 from app.models import (
@@ -12,7 +14,7 @@ from app.models import (
 from app.llm.providers.base import BaseLLMProvider
 from app.llm.providers.mock_provider import MockLLMProvider
 from app.llm.prompts import build_summary_prompt, build_daily_digest_prompt
-from app.llm.schemas import validate_summary_json
+from app.llm.schemas import summary_validation_errors, validate_summary_json
 from app.settings import LLMSettings
 
 
@@ -32,8 +34,25 @@ def create_llm_provider(settings: LLMSettings) -> BaseLLMProvider:
 class LLMService:
     """LLM 摘要服务。"""
 
-    def __init__(self, provider: BaseLLMProvider):
+    def __init__(
+        self,
+        provider: BaseLLMProvider,
+        usage_recorder: Callable[[str, dict], int] | None = None,
+    ):
         self.provider = provider
+        self.usage_recorder = usage_recorder
+
+    def _generate(self, messages: list[dict], purpose: str) -> dict:
+        """调用 provider，并持久化实际返回的 token 用量。"""
+        try:
+            return self.provider.generate(messages)
+        finally:
+            usage = self.provider.consume_usage()
+            if usage and self.usage_recorder:
+                try:
+                    self.usage_recorder(purpose, usage)
+                except Exception as e:
+                    logger.warning(f"Failed to record LLM token usage: {e}")
 
     def summarize_ipo_alert(
         self,
@@ -41,6 +60,7 @@ class LLMService:
         decision: StrategyDecision,
         allotment: AllotmentResult | None = None,
         grey_quote: GreyMarketQuote | None = None,
+        purpose: str = "ipo_alert",
     ) -> LLMSummary:
         """为 IPO 提醒生成摘要。"""
         payload = {
@@ -54,10 +74,13 @@ class LLMService:
 
         for attempt in range(2):
             try:
-                raw_json = self.provider.generate(messages)
+                raw_json = self._generate(messages, purpose)
                 if validate_summary_json(raw_json):
                     return LLMSummary(**raw_json, summary_source="llm")
-                logger.warning(f"LLM output schema validation failed (attempt {attempt + 1})")
+                errors = "; ".join(summary_validation_errors(raw_json))
+                logger.warning(
+                    f"LLM output schema validation failed (attempt {attempt + 1}): {errors}"
+                )
             except Exception as e:
                 logger.warning(f"LLM generate failed (attempt {attempt + 1}): {e}")
 
@@ -69,7 +92,7 @@ class LLMService:
         messages = build_daily_digest_prompt(events)
 
         try:
-            raw_json = self.provider.generate(messages)
+            raw_json = self._generate(messages, "daily_digest")
             if validate_summary_json(raw_json):
                 return LLMSummary(**raw_json, summary_source="llm")
         except Exception as e:

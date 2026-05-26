@@ -35,8 +35,12 @@ class EmailNotifier(BaseNotifier):
         try:
             msg = MIMEMultipart()
             msg["From"] = self.username
-            # Deliver to the configured list without exposing recipient addresses to each other.
-            msg["To"] = self.username
+            # Show a single destination normally, while keeping group delivery private.
+            msg["To"] = (
+                self.receivers[0]
+                if len(self.receivers) == 1
+                else "undisclosed-recipients:;"
+            )
             msg["Subject"] = title
             msg.attach(MIMEText(body, "plain", "utf-8"))
 

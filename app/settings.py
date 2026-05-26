@@ -17,6 +17,7 @@ class LLMSettings(BaseModel):
     model: str = "gpt-4.1-mini"
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
+    thinking: Literal["enabled", "disabled"] | None = None
     temperature: float = 0.2
     max_tokens: int = 1200
     timeout_seconds: int = 30
@@ -80,7 +81,7 @@ class ScheduleItemSettings(BaseModel):
 class ScheduleSettings(BaseModel):
     ipo_calendar: ScheduleItemSettings = ScheduleItemSettings(interval_minutes=10)
     hkex_announcements: ScheduleItemSettings = ScheduleItemSettings(interval_minutes=5)
-    allotment_results: ScheduleItemSettings = ScheduleItemSettings(interval_minutes=5)
+    allotment_results: ScheduleItemSettings = ScheduleItemSettings(enabled=False, interval_minutes=5)
     grey_market: ScheduleItemSettings = ScheduleItemSettings(enabled=False, interval_minutes=1)
     daily_digest: ScheduleItemSettings = ScheduleItemSettings(time="21:30")
 
@@ -126,15 +127,10 @@ class Settings(BaseModel):
 
 def load_env(env_path: str = ".env") -> dict[str, str | None]:
     """加载 .env 文件。"""
-    if Path(env_path).exists():
-        load_dotenv(env_path)
-        logger.info(f"Loaded .env from {env_path}")
-    else:
-        logger.warning(f".env file not found at {env_path}")
-
     keys = [
         "OPENAI_API_KEY",
         "DEEPSEEK_API_KEY",
+        "ZHIPU_API_KEY",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
         "SMTP_USERNAME",
@@ -142,6 +138,15 @@ def load_env(env_path: str = ".env") -> dict[str, str | None]:
         "BARK_DEVICE_KEY",
         "SERVER_CHAN_SEND_KEY",
     ]
+
+    if Path(env_path).exists():
+        load_dotenv(env_path)
+        logger.info(f"Loaded .env from {env_path}")
+    elif any(os.environ.get(key) for key in keys):
+        logger.info("No .env file mounted; using injected environment variables")
+    else:
+        logger.warning(f".env file not found at {env_path}")
+
     return {k: os.environ.get(k) for k in keys}
 
 
@@ -157,6 +162,30 @@ def load_yaml_config(path: str) -> dict:
             return data if data else {}
     except yaml.YAMLError as e:
         raise ConfigError(f"YAML parse error in {path}: {e}")
+
+
+def resolve_llm_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a selected LLM profile while preserving flat-config compatibility."""
+    profiles = data.get("profiles")
+    if profiles is None:
+        return data
+
+    active_profile = data.get("active_profile")
+    if not isinstance(profiles, dict) or not isinstance(active_profile, str):
+        raise ConfigError("LLM profiles require an active_profile and a profiles mapping")
+
+    selected = profiles.get(active_profile)
+    if not isinstance(selected, dict):
+        raise ConfigError(f"LLM active_profile not found: {active_profile}")
+
+    shared = {
+        key: value
+        for key, value in data.items()
+        if key not in {"active_profile", "profiles"}
+    }
+    shared.update(selected)
+    logger.info(f"Using LLM profile: {active_profile}")
+    return shared
 
 
 def load_settings(
@@ -181,7 +210,7 @@ def load_settings(
 
     llm_data = load_yaml_config(f"{config_dir}/llm.yaml")
     if llm_data and "llm" in llm_data:
-        kwargs["llm"] = llm_data["llm"]
+        kwargs["llm"] = resolve_llm_config(llm_data["llm"])
 
     notif_data = load_yaml_config(f"{config_dir}/notification.yaml")
     if notif_data and "notification" in notif_data:

@@ -18,6 +18,9 @@ def init_db(database_url: str = "sqlite:///data/hk_ipo_watchdog.db") -> None:
     """初始化数据库连接并创建表。"""
     global _engine, _SessionFactory
 
+    # Ensure table metadata is registered even when init-db is the first command run.
+    from app.storage import models as _models  # noqa: F401
+
     _engine = create_engine(database_url, echo=False)
     _SessionFactory = sessionmaker(bind=_engine)
 

@@ -3,7 +3,7 @@
 from datetime import datetime, date
 
 from app.models import IPOItem, StrategyDecision, LLMSummary
-from app.notifier.formatter import format_notification, format_daily_digest
+from app.notifier.formatter import append_daily_llm_usage, format_notification, format_daily_digest
 
 
 def _make_ipo() -> IPOItem:
@@ -91,3 +91,21 @@ def test_format_daily_digest():
     assert "1 条" in body
     assert "03888" in body
     assert "不构成投资建议" in body
+
+
+def test_append_daily_llm_usage():
+    body = append_daily_llm_usage(
+        "提醒正文",
+        {
+            "date": "2026-05-26",
+            "calls": 2,
+            "prompt_tokens": 1234,
+            "completion_tokens": 56,
+            "cached_tokens": 100,
+            "total_tokens": 1290,
+        },
+    )
+
+    assert "香港时间 2026-05-26" in body
+    assert "输入 Token: 1,234" in body
+    assert "总 Token: 1,290" in body

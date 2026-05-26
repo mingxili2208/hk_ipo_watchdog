@@ -1,8 +1,9 @@
 """数据访问层 — Repository 模式。"""
 
 import json
-from datetime import datetime, date
+from datetime import date, datetime, time, timedelta, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from loguru import logger
 
@@ -24,6 +25,7 @@ from app.storage.models import (
     IPOEventORM,
     StrategyScoreORM,
     LLMSummaryORM,
+    LLMUsageORM,
     NotificationORM,
 )
 
@@ -327,6 +329,80 @@ class Repository:
         self.session.add(orm)
         self.session.commit()
         return orm.id
+
+    def record_llm_usage(self, purpose: str, usage: dict) -> int:
+        """保存一次由供应商响应返回的 LLM token 用量。"""
+        orm = LLMUsageORM(
+            purpose=purpose,
+            provider=str(usage.get("provider") or "unknown"),
+            model=str(usage.get("model") or "unknown"),
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
+            cached_tokens=int(usage.get("cached_tokens") or 0),
+            total_tokens=int(usage.get("total_tokens") or 0),
+        )
+        self.session.add(orm)
+        self.session.commit()
+        return orm.id
+
+    def get_llm_usage_summary(self) -> list[dict]:
+        """按模型与用途汇总已记录的 token 用量。"""
+        rows = (
+            self.session.query(
+                LLMUsageORM.provider,
+                LLMUsageORM.model,
+                LLMUsageORM.purpose,
+                func.count(LLMUsageORM.id),
+                func.sum(LLMUsageORM.prompt_tokens),
+                func.sum(LLMUsageORM.completion_tokens),
+                func.sum(LLMUsageORM.cached_tokens),
+                func.sum(LLMUsageORM.total_tokens),
+            )
+            .group_by(LLMUsageORM.provider, LLMUsageORM.model, LLMUsageORM.purpose)
+            .order_by(LLMUsageORM.provider, LLMUsageORM.model, LLMUsageORM.purpose)
+            .all()
+        )
+        return [
+            {
+                "provider": row[0],
+                "model": row[1],
+                "purpose": row[2],
+                "calls": int(row[3] or 0),
+                "prompt_tokens": int(row[4] or 0),
+                "completion_tokens": int(row[5] or 0),
+                "cached_tokens": int(row[6] or 0),
+                "total_tokens": int(row[7] or 0),
+            }
+            for row in rows
+        ]
+
+    def get_llm_usage_for_hk_day(self, day: date | None = None) -> dict:
+        """汇总指定香港自然日的 LLM token 用量。"""
+        from app.utils.time_utils import today_hk
+
+        target_day = day or today_hk()
+        hk_tz = timezone(timedelta(hours=8))
+        start = datetime.combine(target_day, time.min, tzinfo=hk_tz).astimezone(timezone.utc)
+        end = start + timedelta(days=1)
+        row = (
+            self.session.query(
+                func.count(LLMUsageORM.id),
+                func.sum(LLMUsageORM.prompt_tokens),
+                func.sum(LLMUsageORM.completion_tokens),
+                func.sum(LLMUsageORM.cached_tokens),
+                func.sum(LLMUsageORM.total_tokens),
+            )
+            .filter(LLMUsageORM.created_at >= start, LLMUsageORM.created_at < end)
+            .one()
+        )
+        return {
+            "date": str(target_day),
+            "calls": int(row[0] or 0),
+            "prompt_tokens": int(row[1] or 0),
+            "completion_tokens": int(row[2] or 0),
+            "cached_tokens": int(row[3] or 0),
+            "total_tokens": int(row[4] or 0),
+        }
 
     def get_active_ipos(self) -> list[IPOItem]:
         """获取所有活跃 IPO。"""

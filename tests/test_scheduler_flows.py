@@ -1,16 +1,16 @@
 """调度任务、存储和通知闭环回归测试。"""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from app.llm.client import LLMService
 from app.llm.providers.mock_provider import MockLLMProvider
-from app.models import Announcement, GreyMarketQuote, IPOItem
+from app.models import Announcement, GreyMarketQuote, IPOItem, StrategyDecision
 from app.notifier.base import SendResult
 from app.scheduler import SchedulerApp
 from app.settings import Settings
 from app.storage.db import init_db
-from app.storage.models import IPOEventORM, NotificationORM
+from app.storage.models import IPOEventORM, LLMUsageORM, NotificationORM
 from app.storage.repository import Repository
 from app.strategy.config_loader import StrategyConfig
 
@@ -19,18 +19,35 @@ class FakeNotifier:
     def __init__(self, channel: str):
         self.channel = channel
         self.calls = 0
+        self.bodies = []
 
     def send(self, title: str, body: str) -> SendResult:
         self.calls += 1
+        self.bodies.append(body)
         return SendResult(channel=self.channel, success=True)
 
 
 class RetryOnceNotifier(FakeNotifier):
     def send(self, title: str, body: str) -> SendResult:
         self.calls += 1
+        self.bodies.append(body)
         if self.calls == 1:
             return SendResult(channel=self.channel, success=False, error_message="temporary")
         return SendResult(channel=self.channel, success=True)
+
+
+class UsageProvider(MockLLMProvider):
+    def generate(self, messages):
+        response = super().generate(messages)
+        self._last_usage = {
+            "provider": "openai",
+            "model": "glm-5.1",
+            "prompt_tokens": 40,
+            "completion_tokens": 20,
+            "cached_tokens": 5,
+            "total_tokens": 60,
+        }
+        return response
 
 
 def _make_app(settings: Settings | None = None) -> tuple[SchedulerApp, Repository]:
@@ -106,6 +123,33 @@ def test_multi_channel_send_records_one_logical_notification():
     assert repo.has_notification_been_sent("02616:new_ipo:event")
 
 
+def test_token_usage_footer_is_only_added_to_email_channel():
+    app, repo = _make_app()
+    repo.session.add(
+        LLMUsageORM(
+            purpose="ipo_alert",
+            provider="openai",
+            model="glm-5.1",
+            prompt_tokens=40,
+            completion_tokens=20,
+            cached_tokens=5,
+            total_tokens=60,
+            created_at=datetime(2026, 5, 25, 16, 30, tzinfo=timezone.utc),
+        )
+    )
+    repo.session.commit()
+    telegram = FakeNotifier("telegram")
+    email = FakeNotifier("email")
+    app._notifiers = [("telegram", telegram, 1), ("email", email, 1)]
+
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
+        app._send_notification("title", "body", 2, "02616:new_ipo:usage", "02616", "new_ipo")
+
+    assert "今日 LLM Token 用量" not in telegram.bodies[0]
+    assert "今日 LLM Token 用量" in email.bodies[0]
+    assert "总 Token: 60" in email.bodies[0]
+
+
 def test_multi_channel_retry_only_retries_failed_channel():
     app, repo = _make_app()
     telegram = FakeNotifier("telegram")
@@ -149,6 +193,26 @@ def test_daily_digest_is_sent_only_once_per_day():
     app.job_send_daily_digest()
 
     assert notifier.calls == 1
+
+
+def test_llm_service_records_vendor_token_usage():
+    init_db("sqlite:///:memory:")
+    repo = Repository()
+    service = LLMService(UsageProvider(), usage_recorder=repo.record_llm_usage)
+    decision = StrategyDecision(
+        stock_code="02616",
+        passed=True,
+        score=70,
+        level=2,
+        evaluated_at=datetime.now(timezone.utc),
+    )
+
+    service.summarize_ipo_alert(_ipo(), decision)
+
+    usage = repo.session.query(LLMUsageORM).one()
+    assert usage.purpose == "ipo_alert"
+    assert usage.total_tokens == 60
+    assert repo.get_llm_usage_summary()[0]["cached_tokens"] == 5
 
 
 def test_allotment_collection_recalculates_and_notifies():

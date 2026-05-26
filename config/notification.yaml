@@ -5,13 +5,13 @@ notification:
     end: "08:00"
 
   telegram:
-    enabled: true
+    enabled: false
     bot_token_env: TELEGRAM_BOT_TOKEN
     chat_id_env: TELEGRAM_CHAT_ID
     min_level: 2
 
   email:
-    enabled: false
+    enabled: true
     smtp_host: "smtp.gmail.com"
     smtp_port: 587
     encryption: "starttls"

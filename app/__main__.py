@@ -1,4 +1,4 @@
-"""允许 python -m app.main 运行。"""
+"""允许 python3 -m app.main 运行。"""
 
 from app.main import main
 

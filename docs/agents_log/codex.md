@@ -269,7 +269,7 @@
 2. **启用方法。** 将 `config/llm.yaml` 的 `provider` 从 `mock` 改为 `openai`，`model` 改为 `glm-5.1`，`api_key_env` 改为 `ZHIPU_API_KEY`，`base_url` 设置为 `https://open.bigmodel.cn/api/paas/v4/`；并在 `.env` 中填写 `ZHIPU_API_KEY`。
 3. **Email 推送已由实现支持。** 在 `config/notification.yaml` 将 `email.enabled` 设为 `true`，配置 SMTP 主机和端口，并在 `.env` 设置 `SMTP_USERNAME`、`SMTP_PASSWORD`、`SMTP_RECEIVER`。默认 Gmail 配置使用 `smtp.gmail.com:587` 与 STARTTLS。
 4. **邮件级别。** 默认 `email.min_level: 3`，只推送重点与紧急提醒；将其改为 `2` 可接收观察级提醒。
-5. **验证方式。** 配置完成后运行 `python -m app.main test-notification` 测试邮件。填入智谱 key 后，应再触发一次需要摘要的任务验证在线模型请求。
+5. **验证方式。** 配置完成后运行 `python3 -m app.main test-notification` 测试邮件。填入智谱 key 后，应再触发一次需要摘要的任务验证在线模型请求。
 
 ### Documentation Changes
 
@@ -396,3 +396,309 @@ SMTP_PASSWORD=your_smtp_app_password
 3. `config/notification.yaml` 默认声明 `encryption: "starttls"`，与 Gmail `smtp.gmail.com:587` 组合一致。
 4. README 与用户手册明确说明敏感凭据与非敏感连接参数的配置边界，并给出常见端口和连接方式示例。
 5. 新增隐式 SSL 与无 TLS 路径的回归测试，并验证调度器传递加密模式。
+
+---
+
+## 2026-05-26: 自动化运行方式与重复调度修复
+
+### Q
+
+用户问题：当前 repository 应如何自动化运行？
+
+### A
+
+系统已有常驻自动运行入口：
+
+- `python3 -m app.main run`：前台启动 APScheduler，适合本地验证或由外部服务管理器托管。
+- `docker compose up -d`：后台启动容器；当前 Compose 配置通过 `restart: unless-stopped` 自动恢复服务，并挂载 `config/`、`data/`、`logs/` 与读取 `.env`，适合长期运行。
+
+核查时发现 `config/schedule.yaml` 的 `hkex_announcements` 与 `allotment_results` 原本均启用，而两者在当前实现中都调用 `job_collect_announcements()`，会每 5 分钟重复抓取同一官方页面和 PDF。本轮已关闭独立 `allotment_results` 调度，因为配发结果已由 HKEX 公告任务涵盖。
+
+### Recommended Startup Flow
+
+1. 准备 `.env`、`config/llm.yaml`、`config/notification.yaml` 和本地 `config/recipients.yaml`。
+2. 运行 `python3 -m app.main run --dry-run` 验证数据源和入库，不实际发送通知。
+3. 启用通知渠道后运行 `python3 -m app.main test-notification`。
+4. 使用 `docker compose up -d --build` 启动长期后台服务，并以 `docker compose logs -f` 查看运行日志。
+
+### Changes
+
+- `config/schedule.yaml` 与 `app/settings.py`：将重复的 `allotment_results` 独立任务默认禁用。
+- `README.md` 与 `docs/06_user_manual.md`：新增调度周期、上线前验证步骤、Docker 后台托管与当前配置注意事项。
+- 新增 `.dockerignore`：排除 `.env`、真实 `config/recipients.yaml`、数据库、日志与缓存，避免 `Dockerfile` 的 `COPY . .` 将本地敏感数据打入镜像。
+
+---
+
+## 2026-05-26: 本地运行误用 Python 2.7 的修复
+
+### Q
+
+用户问题：执行 `python -m app.main test-notification` 时为何报 `SyntaxError`，错误栈显示 `/usr/lib/python2.7/`？
+
+### A
+
+该错误发生在邮件发送之前，与 SMTP 或收件人配置无关。当前宿主机的 `python` 指向 `Python 2.7.18`，而本项目使用函数类型标注等 Python 3 语法，并明确要求 `Python 3.10+`；本机的 `python3` 为 `Python 3.10.12`。
+
+本轮修复：
+
+1. README、用户手册和 CLI 接口示例中的本地命令改为 `python3 -m app.main ...`。
+2. 文档新增 Ubuntu 上 `python` 可能仍指向 Python 2.7 的提示。
+3. CLI 帮助文本显示的启动命令改为 `python3 -m app.main`。
+4. Docker 运行方式保持不变，因为 Dockerfile 使用 `python:3.12-slim` 基础镜像，其中入口命令的 `python` 即为 Python 3。
+
+正确的本地测试邮件命令为：
+
+```bash
+python3 -m app.main test-notification
+```
+
+该命令会真实向已配置的收件人发送测试邮件。
+
+---
+
+## 2026-05-26: 启用 GLM 与 Email 当前配置
+
+### Q
+
+用户问题：AI 和 Email 模式是否已代为打开；`.env` 中已经添加 key，是否还需要修改？
+
+### A
+
+核查时确认 `.env` 已可读取 `ZHIPU_API_KEY` 与 SMTP 凭据，`config/recipients.yaml` 也已有一个可读取的收件地址，因此无需更改私密环境文件。本轮仅修改非敏感配置：
+
+1. `config/llm.yaml` 从 `mock` 切换到 GLM-5.1，使用 `ZHIPU_API_KEY` 与智谱 OpenAI 兼容端点。
+2. `config/notification.yaml` 将 Email 设置为启用。
+3. 因当前未配置 Telegram token/chat ID，将 Telegram 设置为关闭，避免无效渠道警告。
+4. README 与用户手册同步为当前启用状态说明。
+
+`test-notification` 仅验证推送渠道，不调用 LLM；执行以下命令会实际发送测试邮件：
+
+```bash
+python3 -m app.main test-notification
+```
+
+---
+
+## 2026-05-26: LLM 多 Profile 选择配置
+
+### Q
+
+用户问题：为什么 `llm.yaml` 不是提供多种配置进行选择，而只有一个 `mock`？
+
+### A
+
+原实现的 `load_settings()` 仅将 `llm:` 下的一组字段加载为单个 `LLMSettings`，因此只能保存当前生效的模型；早期使用 `mock` 是为了在没有 API key 时仍可开发和测试，但不适合作为实际提醒的 AI 摘要。
+
+本轮已将配置改为可选择 profile 的形式：
+
+1. `config/llm.yaml` 现在同时提供 `mock`、`glm`、`openai` 和 `deepseek` 预设，通过 `active_profile: glm` 选择当前模型。
+2. `app/settings.py` 新增 profile 解析逻辑；运行时仍只实例化一个所选模型，避免同时调用多家服务。
+3. 旧的单一平铺 `llm:` 格式继续兼容读取，已有部署不需要强制迁移。
+4. 新增配置加载测试，覆盖 profile 选择、旧格式兼容和不存在的 profile 报错。
+
+当前 `active_profile` 为 `glm`，继续读取用户已经配置的 `ZHIPU_API_KEY`。
+
+---
+
+## 2026-05-26: 邮件垃圾箱判定后的分阶段测试
+
+### Q
+
+用户问题：测试邮件被识别到垃圾邮件后，后续该如何继续测试？
+
+### A
+
+日志已确认 `2026-05-26 15:24:34` 的测试邮件发送结果为 `Email: OK` 与 `Test notification: 1/1 channels succeeded`。这表示 SMTP 登录、发送和收件地址配置均已通过；邮件进入垃圾箱是接收邮箱的分类结果。
+
+本轮补强：
+
+1. 单一收件人发送时，邮件 `To` 头改为实际收件地址；多个收件人时改用 `undisclosed-recipients:;`，继续保护地址列表且避免将发件人错误显示为收件人。
+2. 新增 `python3 -m app.main test-llm`，用虚拟数据验证当前 GLM profile 的 API 请求及 JSON 摘要格式，不触发邮件发送。
+3. README 与用户手册新增邮件落入垃圾箱时的处理方法和分阶段测试命令。
+
+推荐测试顺序：
+
+1. 在收件邮箱中将已收到的测试邮件标记为非垃圾邮件，并将发件账号加入联系人或允许列表。
+2. 运行 `python3 -m app.main test-llm` 单独验证 GLM；该步骤会产生少量 API 用量，但不发送推送。
+3. 运行 `python3 -m app.main test-notification` 再次检查邮件分类改善情况。
+4. 最后运行 `python3 -m app.main run --dry-run` 验证采集与入库，不发送实际提醒。
+
+---
+
+## 2026-05-26: 真实采集到 Email 的端到端测试
+
+### Q
+
+用户问题：`test-llm` 已经测试过，现在如何测试包含拉取真实数据在内的流程？
+
+### A
+
+现有单项命令无法同时覆盖真实数据拉取、策略评分、LLM 摘要和邮件发送。若直接运行常驻调度，则测试是否发信还取决于实时 IPO 是否达到策略阈值，并可能产生正式通知记录和去重状态。
+
+本轮新增 `python3 -m app.main test-e2e`：
+
+1. 从 `config/sources.yaml` 当前启用的真实 IPO 日历来源拉取数据。
+2. 使用临时内存数据库执行与正式 repository 相同的跨来源合并，并对选出的真实 IPO 进行规则评分。
+3. 调用当前选定的 LLM profile 生成摘要；若发生 fallback，则测试失败且不发邮件。
+4. 以 `[端到端测试]` 标题通过当前 Email 配置实际发送，并在正文注明按当前策略正式运行时是否应推送。
+5. 不写入正式业务数据库、通知历史或去重状态，因此不会影响后续常驻自动运行。
+
+该命令需要访问真实数据源、调用一次 LLM API，并发送一封实际测试邮件。
+
+### Initial Run And Fix
+
+首次真实运行成功从 HKEX 拉取 `3` 条可跟踪 IPO，并从 AAStocks 拉取 `1` 条补充数据；命令选择真实 IPO `02553` 进行评分，得到 `score=12`、`would_notify=False`。随后 GLM 返回未满足摘要 JSON schema，命令按设计中止且未发送邮件。
+
+根据智谱官方文档，GLM-5.1 默认开启 Thinking；本次短结构化摘要使用 `max_tokens: 1200` 时，实际观察到一次响应无法解析为 JSON、一次只包含部分所需字段。基于该现象与官方参数说明，本轮作出以下修复：
+
+1. `LLMSettings` 新增可选 `thinking` 配置。
+2. `glm` profile 设置 `thinking: disabled`，以适配短 JSON 摘要任务。
+3. `OpenAICompatibleProvider` 通过请求体透传智谱 `thinking` 参数，且不会向普通 OpenAI profile 发送该厂商特定参数。
+4. schema 失败日志现在只报告字段/类型问题，不输出摘要文本或凭据。
+
+参考文档：
+
+- 智谱 GLM-5.1：<https://docs.bigmodel.cn/cn/guide/models/text/glm-5.1>
+- 智谱思考模式：<https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode>
+- 智谱结构化输出：<https://docs.bigmodel.cn/cn/guide/capabilities/struct-output>
+
+### Final Verification
+
+修复后于 `2026-05-26 15:51:26` 重新执行 `python3 -m app.main test-e2e`，结果通过：
+
+- HKEX 官方来源拉取到 `3` 条可跟踪 IPO，AAStocks 拉取到 `1` 条补充记录。
+- 临时内存数据库合并后得到 `3` 条 IPO。
+- 被选择用于邮件测试的真实记录为 `02553 Beijing Shougang Lanzatech Technology Co., Ltd.`，策略评分为 `12`，按正式阈值不应推送。
+- GLM-5.1 在 `thinking: disabled` 下成功返回合规摘要。
+- Email 成功发送到配置中的 `1` 个收件地址。
+
+本次测试邮件有 `[端到端测试]` 标记，并未写入正式数据库或通知去重状态。
+
+---
+
+## 2026-05-26: Docker 上线前验收流程
+
+### Q
+
+用户问题：本地真实端到端测试通过后，下一步需要做什么；是否能在 Docker 中进行测试？
+
+### A
+
+可以。核查确认 Dockerfile 使用 Python 3.12，`docker-compose.yml` 在运行时挂载 `./config:/app/config` 并通过 `env_file: .env` 注入凭据；`.dockerignore` 排除 `.env` 和真实 `config/recipients.yaml` 是为防止秘密被写进镜像，不会影响 Compose 运行时读取这些本地配置。
+
+新增的 Docker 验收命令为：
+
+```bash
+docker compose run --rm --build hk-ipo-watchdog test-e2e
+```
+
+它会使用一次性容器完成真实来源采集、GLM 摘要和 Email 测试发送，完成后删除该测试容器，不启动常驻调度。容器测试通过后，再以 `docker compose up -d --build` 启动长期自动运行。
+
+### Verification
+
+于 `2026-05-26 16:20:26` 执行 Docker 端到端测试，结果成功：
+
+- Docker 镜像基于 Python 3.12 构建完成；构建上下文约 `586 KB`，本地密钥、数据库和日志未复制到镜像。
+- 一次性容器成功拉取 HKEX `3` 条可跟踪 IPO 与 AAStocks `1` 条补充记录，合并为 `3` 条 IPO。
+- 容器使用 GLM-5.1 为真实记录 `02553` 生成合规摘要。
+- 于 `2026-05-26 16:21:15` 成功发送 `[端到端测试]` Email 至 `1` 个配置收件人。
+
+容器运行中同时发现一个非功能性提示问题：由于 `.env` 被刻意排除在镜像外，`load_env()` 曾记录 `.env file not found` 警告，即使 Compose 已通过 `env_file` 注入所需变量。本轮已将该场景调整为信息日志 `No .env file mounted; using injected environment variables`。
+
+修复日志提示后重新构建一次性容器，仅加载配置而不发起网络业务请求；容器确认读取到 `glm-5.1`、已启用的 Email 与 `1` 个收件地址，并以正常信息日志报告环境变量由 Compose 注入。
+
+---
+
+## 2026-05-26: Docker 常驻调度与 GLM Token 用量统计
+
+### Q
+
+用户问题：当前按分钟抓取和每日汇总的行为在 Docker 持续运行时是否一致；GLM token 用量能否统计？
+
+### A
+
+一致。Docker Compose 将宿主机 `config/` 挂载到容器，容器入口仍运行同一套 `python -m app.main run` 调度逻辑。因此当前容器常驻运行时仍是每 10 分钟采集 IPO 日历、每 5 分钟采集 HKEX 公告、每天香港时间 `21:30` 生成日报。需要注意，采集轮询本身不调用 GLM；只有达到提醒条件需要生成摘要，或生成日报时，才会发生 LLM 调用和 token 消耗。
+
+根据智谱对话补全 API 文档，其响应的 `usage` 字段会返回 `prompt_tokens`、`completion_tokens`、`total_tokens` 与缓存 token 明细。因此本轮实现了本地精确统计：
+
+1. `OpenAICompatibleProvider` 读取每次实际响应的 `usage`，包括响应最终未通过摘要 schema 校验但已实际完成的调用。
+2. 新增数据库表 `llm_usage`，记录模型、用途、输入/输出/缓存/总 token 数。
+3. 常驻正式提醒摘要、日报、`test-llm` 与 `test-e2e` 均会记录用量；`test-e2e` 仍不写入正式 IPO 或通知去重数据，只保存实际产生的 token 成本。
+4. 新增查询命令：
+
+```bash
+python3 -m app.main usage llm
+```
+
+5. Docker 下数据库位于挂载的 `./data` 中，容器重启后统计仍然保留；该功能上线以前已经发生的 API 调用不能回溯补记。
+6. 同时修复 `init-db` 首次执行时未主动加载 ORM 元数据的问题，确保包括 `llm_usage` 在内的数据库表可被初始化命令创建。
+
+参考文档：
+
+- 智谱对话补全 API：<https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E5%AF%B9%E8%AF%9D%E8%A1%A5%E5%85%A8>
+
+### Verification
+
+- 执行 `python3 -m pytest -q`：通过，`95 passed`。
+- 执行 `python3 -m app.main usage llm`：命令可正常读取正式 SQLite 数据库；新增统计功能启用前无历史用量记录，因此当前显示 `No LLM token usage recorded`。
+
+---
+
+## 2026-05-26: Email 显示今日 GLM Token 用量
+
+### Q
+
+用户问题：能否在 Email 中也打上今日的 token 用量？
+
+### A
+
+已实现。Email 正文末尾现在会追加按香港自然日汇总的 LLM token 段落，显示调用次数、输入 token、输出 token、缓存命中 token 与总 token。实现要点如下：
+
+1. 新增 `Repository.get_llm_usage_for_hk_day()`，按 `Asia/Hong_Kong` 日期边界统计 `llm_usage`，避免 UTC 跨日导致“今日”统计偏差。
+2. `SchedulerApp._send_notification()` 仅对 Email 渠道追加汇总，不改变 Telegram、Bark 或 Server 酱的正文长度。
+3. `test-notification` 与 `test-e2e` 邮件使用相同 footer；其中 `test-e2e` 会先记录本次摘要的 token，再组装邮件正文，因此邮件内数字包含本次调用。
+4. 正式提醒与日报同样在摘要调用已记录后发送，因此邮件显示的是发送瞬间截至当前的今日累计用量。
+
+### Verification
+
+- 执行受影响的 formatter、scheduler 与 command 测试：`24 passed`。
+- 执行完整测试集：`98 passed`。
+
+---
+
+## 2026-05-26: Docker 收件人配置重载与发布整理
+
+### Q
+
+用户问题：新增接收邮箱后是否需要重启 Docker；将操作补充到 README、优化文档结构，并提交推送当前修复。
+
+### A
+
+核查确认 `docker-compose.yml` 会将宿主机 `config/` 挂载到容器，因此容器可看到 `config/recipients.yaml` 文件的更新；但程序只在启动阶段通过 `load_settings()` 读取收件人，并且 `SchedulerApp._get_notifiers()` 会缓存已经创建的 `EmailNotifier`。因此常驻容器不会自动使用新增邮箱，修改收件人后必须重启进程。
+
+README 已重新组织为以下使用路径：
+
+1. 安装与配置：解释本地敏感凭据、模型 profile、SMTP 与多收件人文件。
+2. 运行与验证：集中列出数据库初始化、推送/LLM/真实端到端测试及 token 查询。
+3. 自动运行：集中说明调度周期、前台服务、Docker 托管、容器重建和变更收件人的操作。
+
+README 新增的实际操作区分如下：
+
+```bash
+# 仅修改 config/recipients.yaml，容器程序已经是最新版本
+docker compose restart hk-ipo-watchdog
+
+# 同时需要应用本地代码更新或新功能，例如本轮 Email token footer
+docker compose up -d --build
+
+# 重载后向全部配置收件人发送验证邮件
+docker compose exec -T hk-ipo-watchdog python -m app.main test-notification
+```
+
+当前核查时，运行中的容器仍是本轮 token 用量统计与 Email footer 加入之前构建的旧镜像：其 `python -m app.main --help` 不包含 `usage` 命令。因此用户若要使用本轮功能，应采用带 `--build` 的命令替换常驻容器。
+
+### Verification
+
+- `config/recipients.yaml` 与 `.env` 均由 `.gitignore` 排除，未进入 Git 跟踪列表。
+- 执行 `git diff --check`：无空白格式问题。
+- 执行 `python3 -m pytest -q`：通过，`98 passed`。

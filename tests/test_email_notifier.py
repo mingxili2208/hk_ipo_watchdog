@@ -24,7 +24,7 @@ def test_email_notifier_sends_one_message_to_configured_recipients():
     args = smtp.return_value.sendmail.call_args.args
     assert args[0] == "sender@example.com"
     assert args[1] == recipients
-    assert "To: sender@example.com" in args[2]
+    assert "To: undisclosed-recipients:;" in args[2]
     assert "first@example.com" not in args[2]
     assert "second@example.com" not in args[2]
 
@@ -48,6 +48,7 @@ def test_email_notifier_supports_implicit_ssl():
     smtp.assert_not_called()
     smtp_ssl.assert_called_once_with("smtp.example.com", 465, timeout=30)
     smtp_ssl.return_value.login.assert_called_once_with("sender@example.com", "app-password")
+    assert "To: receiver@example.com" in smtp_ssl.return_value.sendmail.call_args.args[2]
 
 
 def test_email_notifier_supports_unencrypted_smtp_without_starttls():

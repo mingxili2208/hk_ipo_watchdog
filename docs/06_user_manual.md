@@ -28,9 +28,11 @@ Docker / Docker Compose
 如果本地运行：
 
 ```bash
-python --version
+python3 --version
 # Python 3.10 or above
 ```
+
+本手册中的本地运行命令均使用 `python3`；若系统中的 `python` 指向 Python 2.7，则不能用于启动本项目。
 
 ## 3. 安装方式
 
@@ -206,26 +208,37 @@ alerts:
 config/llm.yaml
 ```
 
-OpenAI 示例：
+该文件提供可选 profile；每次运行仅使用 `active_profile` 指定的一项。当前选择 `glm`，通过智谱 OpenAI 兼容端点调用 GLM-5.1：
 
 ```yaml
 llm:
-  provider: openai
-  model: gpt-4.1-mini
-  api_key_env: OPENAI_API_KEY
+  active_profile: glm
   temperature: 0.2
+  max_tokens: 1200
+  timeout_seconds: 30
+  retry_times: 1
+  profiles:
+    mock:
+      provider: mock
+    glm:
+      provider: openai
+      model: glm-5.1
+      api_key_env: ZHIPU_API_KEY
+      base_url: "https://open.bigmodel.cn/api/paas/v4/"
+      thinking: disabled
+    openai:
+      provider: openai
+      model: gpt-4.1-mini
+      api_key_env: OPENAI_API_KEY
+      base_url: null
+    deepseek:
+      provider: openai
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+      base_url: "https://api.deepseek.com"
 ```
 
-OpenAI-compatible 示例：
-
-```yaml
-llm:
-  provider: openai_compatible
-  model: deepseek-chat
-  api_key_env: DEEPSEEK_API_KEY
-  base_url: "https://api.deepseek.com"
-  temperature: 0.2
-```
+将 `active_profile` 改为 `mock`、`glm`、`openai` 或 `deepseek` 即可切换；除 `mock` 外，需在本地 `.env` 提供所选服务的 API key。GLM-5.1 默认开启 Thinking；本系统的提醒摘要要求严格短 JSON，因此 `glm` profile 使用 `thinking: disabled` 以避免生成结果被推理内容挤占或截断。旧的单一模型配置格式仍可继续读取。
 
 ## 4.5 配置推送
 
@@ -281,39 +294,81 @@ notification:
 
 `starttls` 通常配合端口 `587`，`ssl` 通常配合端口 `465`；`none` 仅适用于明确可信的内部 SMTP 服务。
 
+当前仓库已启用 Email，并关闭没有配置凭据的 Telegram。执行 `python3 -m app.main test-notification` 会实际向 `config/recipients.yaml` 中的邮箱发送测试邮件。
+
+若测试日志显示 `Email: OK` 但邮件被识别为垃圾邮件，代表 SMTP 已完成发送，而不是配置失败。请在收件邮箱中标记该邮件为非垃圾邮件，并将发件账号加入联系人或允许列表。单收件人发送时程序会显示实际收件地址作为邮件 `To` 头；多收件人发送仍隐藏地址列表。
+
 ## 5. 运行方式
 
 ## 5.1 初始化数据库
 
 ```bash
-python -m app.main init-db
+python3 -m app.main init-db
 ```
 
 ## 5.2 测试数据源
 
 ```bash
-python -m app.main collect ipo-calendar --once
+python3 -m app.main collect ipo-calendar --once
 ```
 
 ## 5.3 测试推送
 
 ```bash
-python -m app.main test-notification
+python3 -m app.main test-notification
 ```
 
-成功后 Telegram 应收到测试消息。
+成功后，当前已启用的 Email 收件地址应收到测试邮件；如另行启用 Telegram，则对应会收到测试消息。Email 正文末尾包含截至发送时的香港当日 LLM token 累计用量。
 
-## 5.4 启动常驻服务
+## 5.4 测试 LLM
 
 ```bash
-python -m app.main run
+python3 -m app.main test-llm
 ```
 
-## 5.5 Docker 运行
+该命令使用虚拟数据调用当前选择的 LLM profile，并校验返回的摘要 JSON 格式。它不会发送邮件或其他通知，但真实 LLM 会产生少量 API 用量，并将供应商响应返回的 token 用量记录到数据库。
+
+## 5.5 真实端到端测试
+
+```bash
+python3 -m app.main test-e2e
+```
+
+该命令从已启用的真实 IPO 日历来源拉取当前数据，在临时内存数据库中执行同样的来源合并和策略评分，然后使用当前 LLM 生成摘要并发送一封标题带 `[端到端测试]` 的邮件。该测试会产生一次 API 用量和一次邮件发送；只将 token 用量写入正式数据库的 `llm_usage` 表，不写入正式 IPO 或通知去重记录。若选择的 IPO 按规则不应正式推送，正文也会明确显示这一点。
+
+## 5.6 查看 LLM Token 用量
+
+```bash
+python3 -m app.main usage llm
+```
+
+该命令汇总此功能启用后由 GLM/其他 OpenAI 兼容 profile 返回的实际 `prompt_tokens`、`completion_tokens`、`cached_tokens` 和 `total_tokens`。被统计的场景包括 LLM 测试、真实端到端测试、正式提醒摘要和日报；普通轮询未触发摘要时不会产生 LLM token。Email 的正式提醒、日报及测试邮件也会在正文末尾附上发送当日（香港时间）的汇总；邮件摘要本身产生的 token 会先记录、再随同邮件显示。历史调用无法追溯补记。
+
+## 5.7 启动常驻服务
+
+```bash
+python3 -m app.main run
+```
+
+该命令在前台启动定时调度。`config/schedule.yaml` 默认每 10 分钟采集 IPO 日历、每 5 分钟采集 HKEX 公告（其中已包含配发结果），每天香港时间 21:30 生成日报。`allotment_results` 独立任务默认关闭，避免与公告采集重复请求同一来源。
+
+## 5.8 Docker 运行
+
+在启动常驻容器前，建议先以一次性容器验证与宿主机相同的端到端链路：
+
+```bash
+docker compose run --rm --build hk-ipo-watchdog test-e2e
+```
+
+Compose 会将本机 `config/` 与 `data/` 挂载到容器并读取 `.env` 作为环境变量；`.dockerignore` 排除密钥与真实收件人文件只影响镜像构建内容，不影响运行时挂载。该命令结束后删除测试容器，不会启动长期调度，但会调用一次 LLM、发送一封测试邮件，并将 token 用量保留在挂载的数据文件中。
+
+端到端测试通过后，启动长期服务：
 
 ```bash
 docker compose up -d
 ```
+
+Docker Compose 使用 `restart: unless-stopped` 持续托管服务，并挂载 `config/`、`data/`、`logs/`，同时从 `.env` 注入本地凭据。项目的 `.dockerignore` 会排除 `.env`、实际收件人配置、数据库和日志，防止这些本地内容被复制进 Docker 镜像。需要在后台长期运行时，优先使用该方式。
 
 查看日志：
 
@@ -332,31 +387,31 @@ docker compose down
 ## 6.1 手动采集 IPO 日历
 
 ```bash
-python -m app.main collect ipo-calendar
+python3 -m app.main collect ipo-calendar
 ```
 
 ## 6.2 手动采集公告
 
 ```bash
-python -m app.main collect announcements
+python3 -m app.main collect announcements
 ```
 
 ## 6.3 手动采集暗盘
 
 ```bash
-python -m app.main collect grey-market
+python3 -m app.main collect grey-market
 ```
 
 ## 6.4 手动跑策略扫描
 
 ```bash
-python -m app.main strategy scan
+python3 -m app.main strategy scan
 ```
 
 ## 6.5 手动发送日报
 
 ```bash
-python -m app.main digest daily
+python3 -m app.main digest daily
 ```
 
 ## 6.6 Dry Run
@@ -364,7 +419,31 @@ python -m app.main digest daily
 只运行，不发送推送：
 
 ```bash
-python -m app.main run --dry-run
+python3 -m app.main run --dry-run
+```
+
+## 6.7 测试 LLM
+
+```bash
+python3 -m app.main test-llm
+```
+
+## 6.8 真实数据端到端测试
+
+```bash
+python3 -m app.main test-e2e
+```
+
+## 6.9 Docker 端到端测试
+
+```bash
+docker compose run --rm --build hk-ipo-watchdog test-e2e
+```
+
+## 6.10 LLM Token 用量汇总
+
+```bash
+python3 -m app.main usage llm
 ```
 
 ## 7. 推送内容说明
@@ -497,7 +576,7 @@ docker compose logs -f
 处理方式：
 
 ```bash
-python -m app.main collect ipo-calendar --log-level DEBUG
+python3 -m app.main collect ipo-calendar --log-level DEBUG
 ```
 
 查看 raw data：

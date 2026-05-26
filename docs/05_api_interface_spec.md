@@ -378,7 +378,25 @@ CREATE TABLE llm_summaries (
 );
 ```
 
-## 3.8 `notifications`
+## 3.8 `llm_usage`
+
+```sql
+CREATE TABLE llm_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    purpose TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    cached_tokens INTEGER,
+    total_tokens INTEGER,
+    created_at DATETIME
+);
+```
+
+`purpose` 用于区分 `ipo_alert`、`daily_digest`、`test_llm` 与 `test_e2e`。用量来自模型供应商响应的 `usage` 字段；未调用 LLM 的采集轮询不产生记录。
+
+## 3.9 `notifications`
 
 ```sql
 CREATE TABLE notifications (
@@ -728,13 +746,16 @@ class RepositoryError(Exception): ...
 建议支持：
 
 ```bash
-python -m app.main run
-python -m app.main collect ipo-calendar
-python -m app.main collect announcements
-python -m app.main collect grey-market
-python -m app.main strategy scan
-python -m app.main digest daily
-python -m app.main test-notification
+python3 -m app.main run
+python3 -m app.main collect ipo-calendar
+python3 -m app.main collect announcements
+python3 -m app.main collect grey-market
+python3 -m app.main strategy scan
+python3 -m app.main digest daily
+python3 -m app.main test-notification
+python3 -m app.main test-llm
+python3 -m app.main test-e2e
+python3 -m app.main usage llm
 ```
 
 参数：

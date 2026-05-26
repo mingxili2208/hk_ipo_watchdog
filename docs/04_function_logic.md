@@ -741,6 +741,7 @@ SendResult
 职责：
 
 - 发送邮件。
+- 在 Email 正文末尾追加发送当日（香港时间）的 LLM token 累计值。
 
 ## 9.4 `send_notification(notification)`
 
@@ -754,8 +755,9 @@ SendResult
 1. 检查 notification level
 2. 检查是否重复推送
 3. 格式化内容
-4. 逐渠道发送
-5. 保存发送结果
+4. 对 Email 渠道追加当日 LLM token 汇总
+5. 逐渠道发送
+6. 保存发送结果
 ```
 
 ## 10. Scheduler 模块

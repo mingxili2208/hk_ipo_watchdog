@@ -31,21 +31,41 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
             self.client = OpenAI(**kwargs)
             self.model = settings.model
+            self.thinking = settings.thinking
             self.temperature = settings.temperature
             self.max_tokens = settings.max_tokens
+            self._last_usage = None
         except Exception as e:
             raise LLMError(f"Failed to initialize OpenAI client: {e}")
 
     def generate(self, messages: list[dict]) -> dict:
         """调用 OpenAI API 生成 JSON。"""
         try:
+            self._last_usage = None
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "response_format": {"type": "json_object"},
+            }
+            if self.thinking:
+                kwargs["extra_body"] = {"thinking": {"type": self.thinking}}
+
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                response_format={"type": "json_object"},
+                **kwargs
             )
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                details = getattr(usage, "prompt_tokens_details", None)
+                self._last_usage = {
+                    "provider": self.settings.provider,
+                    "model": self.model,
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+                    "cached_tokens": getattr(details, "cached_tokens", 0) or 0,
+                }
 
             content = response.choices[0].message.content
             return json.loads(content)

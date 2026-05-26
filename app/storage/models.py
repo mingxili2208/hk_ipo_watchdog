@@ -164,6 +164,20 @@ class LLMSummaryORM(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class LLMUsageORM(Base):
+    __tablename__ = "llm_usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    cached_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_now)
+
+
 class NotificationORM(Base):
     __tablename__ = "notifications"
 

@@ -17,9 +17,9 @@
 - Python 3.10+
 - Docker / Docker Compose（可选）
 
-## 快速开始
+## 安装与配置
 
-### 1. 安装依赖
+### 安装依赖
 
 ```bash
 python3 -m venv .venv
@@ -27,7 +27,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. 配置
+后续本地运行命令统一使用 `python3`。在部分 Ubuntu 环境中，系统命令 `python` 仍可能指向不支持本项目语法的 Python 2.7。
+
+### 创建本地配置
 
 ```bash
 cp .env.example .env
@@ -50,9 +52,9 @@ cp config/recipients.example.yaml config/recipients.yaml
 
 | 功能 | 启用位置 | `.env` 必填项 | 其他配置 |
 |---|---|---|---|
-| GLM-5.1 AI 摘要 | `config/llm.yaml` 中设置 `provider: openai` 与 `model: glm-5.1` | `ZHIPU_API_KEY` | 设置智谱 `base_url` |
-| OpenAI AI 摘要 | `config/llm.yaml` 中设置对应模型 | `OPENAI_API_KEY` | `base_url: null` |
-| DeepSeek AI 摘要 | `config/llm.yaml` 中设置对应模型 | `DEEPSEEK_API_KEY` | 设置 DeepSeek `base_url` |
+| GLM-5.1 AI 摘要 | `config/llm.yaml` 中设置 `active_profile: glm` | `ZHIPU_API_KEY` | 已提供智谱端点预设 |
+| OpenAI AI 摘要 | `config/llm.yaml` 中设置 `active_profile: openai` | `OPENAI_API_KEY` | 已提供 OpenAI 预设 |
+| DeepSeek AI 摘要 | `config/llm.yaml` 中设置 `active_profile: deepseek` | `DEEPSEEK_API_KEY` | 已提供 DeepSeek 端点预设 |
 | Telegram 推送 | `config/notification.yaml` 中 `telegram.enabled: true` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | 设置 `min_level` |
 | Email 推送 | `config/notification.yaml` 中 `email.enabled: true` | `SMTP_USERNAME`, `SMTP_PASSWORD` | 收件地址写入 `config/recipients.yaml` |
 | Bark 推送 | `config/notification.yaml` 中 `bark.enabled: true` | `BARK_DEVICE_KEY` | 设置 `min_level` |
@@ -77,12 +79,11 @@ SERVER_CHAN_SEND_KEY=
 
 `SMTP_RECEIVER` 已废弃，不再由程序读取；邮件收件人应配置在 `config/recipients.yaml`。
 
-### 当前默认配置的含义
+### 当前配置的含义
 
-- `config/llm.yaml` 默认 `provider: mock`：不要求任何 LLM key，但摘要是开发用模拟内容。
-- `config/notification.yaml` 当前启用 Telegram：如未设置 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_CHAT_ID`，不会产生实际 Telegram 推送。
-- Email、Bark、Server 酱默认未启用：未启用时对应 `.env` 变量可以为空。
-- 若准备使用 GLM-5.1，需要同时修改 `config/llm.yaml` 并填写 `ZHIPU_API_KEY`，仅填写 key 不会自动切换模型。
+- `config/llm.yaml` 当前配置为 GLM-5.1，通过智谱兼容接口生成真实摘要；运行时需要 `.env` 中提供 `ZHIPU_API_KEY`。
+- `config/notification.yaml` 当前启用 Email，并关闭未配置凭据的 Telegram；Email 运行时需要 SMTP 凭据与本地 `config/recipients.yaml` 中至少一个收件地址。
+- Bark、Server 酱当前未启用：未启用时对应 `.env` 变量可以为空。
 
 ## 数据来源
 
@@ -105,57 +106,46 @@ SERVER_CHAN_SEND_KEY=
 
 采集、存储和策略评分本身不依赖 LLM API key。
 
-当前 `config/llm.yaml` 默认配置为：
+`config/llm.yaml` 保存多个可选预设，但每次运行只启用 `active_profile` 指定的一项。当前已选择 `glm`：
 
 ```yaml
 llm:
-  provider: mock
-```
-
-`mock` 只适用于开发和测试：不需要 API key，但生成的是模拟摘要，不应作为真实提醒内容使用。
-
-实际运行若需要 AI 生成的中文摘要，请切换到 OpenAI 兼容接口，并在 `.env` 中配置相应 key，例如：
-
-```yaml
-# config/llm.yaml: OpenAI 示例
-llm:
-  provider: openai
-  model: gpt-4.1-mini
-  api_key_env: OPENAI_API_KEY
-  base_url: null
-```
-
-```bash
-# .env
-OPENAI_API_KEY=your_api_key
-```
-
-DeepSeek 等 OpenAI 兼容接口可通过 `base_url`、`model` 和 `api_key_env` 配置：
-
-```yaml
-llm:
-  provider: openai
-  model: deepseek-chat
-  api_key_env: DEEPSEEK_API_KEY
-  base_url: "https://api.deepseek.com"
-```
-
-### 使用智谱 GLM-5.1
-
-智谱官方文档中的模型标识是 `glm-5.1`，Chat Completions 接口为
-`https://open.bigmodel.cn/api/paas/v4/chat/completions`。本项目使用 OpenAI 兼容客户端，因此配置 `base_url` 到 `/v4/` 即可由客户端拼接 `chat/completions`：
-
-```yaml
-# config/llm.yaml
-llm:
-  provider: openai
-  model: glm-5.1
-  api_key_env: ZHIPU_API_KEY
-  base_url: "https://open.bigmodel.cn/api/paas/v4/"
+  active_profile: glm
   temperature: 0.2
   max_tokens: 1200
   timeout_seconds: 30
   retry_times: 1
+  profiles:
+    mock:
+      provider: mock
+    glm:
+      provider: openai
+      model: glm-5.1
+      api_key_env: ZHIPU_API_KEY
+      base_url: "https://open.bigmodel.cn/api/paas/v4/"
+      thinking: disabled
+    openai:
+      provider: openai
+      model: gpt-4.1-mini
+      api_key_env: OPENAI_API_KEY
+      base_url: null
+    deepseek:
+      provider: openai
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+      base_url: "https://api.deepseek.com"
+```
+
+切换模型时只需修改 `active_profile` 并在 `.env` 填写所选 profile 对应的 key。`mock` 不需要 API key，但生成的是开发用模拟摘要，不应作为真实提醒内容使用。为兼容旧部署，单一平铺格式的 `llm:` 配置仍可读取。
+
+### 使用智谱 GLM-5.1
+
+智谱官方文档中的模型标识是 `glm-5.1`，Chat Completions 接口为
+`https://open.bigmodel.cn/api/paas/v4/chat/completions`。本项目使用 OpenAI 兼容客户端，因此 `glm` profile 中的 `/v4/` 基础地址会由客户端拼接 `chat/completions`：
+
+```yaml
+llm:
+  active_profile: glm
 ```
 
 ```bash
@@ -163,7 +153,7 @@ llm:
 ZHIPU_API_KEY=your_zhipu_api_key
 ```
 
-其中 `provider: openai` 表示使用项目现有的 OpenAI 兼容调用器，并不表示请求发往 OpenAI；实际请求将按 `base_url` 发往智谱 API。未提供真实 key 时无法完成在线调用验证。
+`glm` profile 内部的 `provider: openai` 表示使用项目现有的 OpenAI 兼容调用器，并不表示请求发往 OpenAI；实际请求将按其 `base_url` 发往智谱 API。GLM-5.1 默认会开启 Thinking，而提醒摘要要求短且严格的 JSON 输出，因此此 profile 显式设置 `thinking: disabled`，减少推理过程占用输出预算导致的结构化结果截断。未提供真实 key 时无法完成在线调用验证。
 
 若已选择真实 LLM provider 但未设置对应环境变量，程序启动该功能时会报缺少 API key。
 
@@ -171,14 +161,14 @@ ZHIPU_API_KEY=your_zhipu_api_key
 
 系统在策略评分达到推送阈值，或产生符合规则的配发/暗盘事件时发送提醒；每日汇总按 `config/schedule.yaml` 的时间发送。默认策略低于 `only_push_score_above: 60` 不会发送实时提醒。
 
-当前 `config/notification.yaml` 默认启用 Telegram，需在 `.env` 配置：
+若希望另行启用 Telegram，需先在 `.env` 配置：
 
 ```bash
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 ```
 
-收到的消息包含股票代码和名称、当前状态、入场费、截止认购日期、上市日期、评分、触发原因、风险提示和摘要。
+收到的消息包含股票代码和名称、当前状态、入场费、截止认购日期、上市日期、评分、触发原因、风险提示和摘要。Email 正文末尾还会显示发送时截至当前的香港自然日 LLM token 累计用量。
 
 可选推送渠道及所需环境变量：
 
@@ -192,8 +182,10 @@ TELEGRAM_CHAT_ID=your_chat_id
 配置好渠道后执行：
 
 ```bash
-python -m app.main test-notification
+python3 -m app.main test-notification
 ```
+
+若日志显示 `Email: OK` 而邮件进入垃圾箱，说明 SMTP 投递已成功，收件服务进行了分类。请在邮箱中将测试邮件标记为“非垃圾邮件”，并将发件账号加入联系人或白名单；程序无法保证第三方邮箱一定将邮件放入收件箱。
 
 启用 `quiet_hours` 时静默时间内不发送；多渠道中的失败渠道会在后续触发时单独重试，不重复发送已成功渠道。
 
@@ -265,6 +257,8 @@ recipients:
 
 修改收件人列表不需要变更发件账号密码；每次发送邮件时，所有列表中的地址都会收到同一条提醒。邮件正文头不会公开其他接收地址。
 
+单收件人邮件的 `To` 头会显示该收件地址；多收件人邮件使用隐藏收件人头并通过 SMTP 投递列表发送，从而不向各接收方公开邮箱列表。
+
 邮件通过 `min_level` 控制接收等级。当前仓库配置为 `min_level: 2`，会接收观察、重点及紧急提醒；若只希望邮件接收重点及紧急提醒，可调整为：
 
 ```yaml
@@ -273,7 +267,7 @@ notification:
     min_level: 3
 ```
 
-启用后执行 `python -m app.main test-notification`，系统会向 `config/recipients.yaml` 中配置的所有邮箱发送一封测试邮件。常驻运行时，满足级别和策略阈值的提醒及已启用的日报会通过邮件发送。
+启用后执行 `python3 -m app.main test-notification`，系统会向 `config/recipients.yaml` 中配置的所有邮箱发送一封测试邮件。常驻运行时，满足级别和策略阈值的提醒及已启用的日报会通过邮件发送。
 
 ## 开源发布与密钥保护
 
@@ -312,51 +306,137 @@ config/recipients.example.yaml
 git rm --cached .env config/recipients.yaml
 ```
 
-### 3. 初始化数据库
+## 运行与验证
+
+### 初始化数据库
 
 ```bash
-python -m app.main init-db
+python3 -m app.main init-db
 ```
 
-### 4. 测试推送
+### 分项测试
 
 ```bash
-python -m app.main test-notification
+python3 -m app.main test-notification
 ```
 
-### 5. 手动采集
+日志为 `Email: OK` 即表示邮件服务发送成功；首次邮件如落入垃圾箱，请先在邮箱端标记为非垃圾邮件，再进行后续通知测试。
+
+测试 GLM API 和返回摘要格式时执行：
+
+```bash
+python3 -m app.main test-llm
+```
+
+该命令会调用当前选定的 LLM profile，可能产生少量 API 用量，但仅使用虚拟数据且不会发送任何推送。供应商返回的 token 用量会记录在本地数据库中。
+
+### 真实端到端测试
+
+在 LLM 和 Email 分别测试通过后，执行：
+
+```bash
+python3 -m app.main test-e2e
+```
+
+该命令会从当前启用的真实 IPO 日历来源采集数据，在临时内存数据库中执行合并与规则评分，调用当前 LLM 生成真实数据摘要，并发送一封标题含 `[端到端测试]` 的 Email。它会产生一次 LLM API 用量及一封实际邮件；只将本次 token 用量写入正式数据库的 `llm_usage` 表，不写入正式 IPO、通知记录或去重状态。即使当前真实 IPO 尚未达到正式推送阈值，测试邮件仍会发送，并在正文中注明按规则是否应正式推送。
+
+### 查看 LLM Token 用量
+
+智谱对话补全接口在响应中返回实际 token 使用量。系统会从现在开始记录由 `test-llm`、`test-e2e`、正式提醒摘要及每日汇总产生的调用：
+
+```bash
+python3 -m app.main usage llm
+```
+
+输出按模型和调用用途汇总 `prompt_tokens`、`completion_tokens`、`cached_tokens` 与 `total_tokens`。Email 通知和测试邮件正文也会附上发送当日（香港时间）的累计值；若该封邮件先调用 LLM 生成摘要，当次用量已包含在正文统计中。该统计不能补记功能启用之前已经发生的调用。
+
+### 手动操作
 
 ```bash
 # 采集 IPO 日历
-python -m app.main collect ipo-calendar --once
+python3 -m app.main collect ipo-calendar --once
 
 # 采集公告
-python -m app.main collect announcements --once
+python3 -m app.main collect announcements --once
 ```
-
-### 6. 策略扫描
 
 ```bash
-python -m app.main strategy scan
+# 扫描数据库中已有的 IPO 并重新评分
+python3 -m app.main strategy scan
+
+# 立即生成并发送当日日报
+python3 -m app.main digest daily
 ```
 
-### 7. 发送日报
+## 自动运行
+
+### 调度频率
+
+默认任务配置见 `config/schedule.yaml`：
+
+| 任务 | 默认频率 | 说明 |
+|---|---:|---|
+| IPO 日历 | 每 10 分钟 | 读取 HKEX 官方招股公告并用 AAStocks 补字段 |
+| HKEX 公告 / 配发结果 | 每 5 分钟 | 同一个任务读取官方配发 PDF；无需另起配发轮询 |
+| 暗盘 | 默认关闭 | 启用后默认每 1 分钟采集 |
+| 日报 | 每天 `21:30` | 时区为 `Asia/Hong_Kong` |
+
+### 前台运行
 
 ```bash
-python -m app.main digest daily
+python3 -m app.main run
 ```
 
-### 8. 启动常驻服务
+该命令会在当前终端前台持续运行 APScheduler；关闭终端会停止监控。长期使用推荐 Docker Compose，或自行将同一命令托管为系统服务。
+
+### Docker 自动运行（推荐）
+
+上线前先完成本地私密配置：
 
 ```bash
-python -m app.main run
+cp .env.example .env
+cp config/recipients.example.yaml config/recipients.yaml
+# 编辑 .env、config/llm.yaml、config/notification.yaml、config/recipients.yaml
 ```
 
-### 9. Docker 部署
+首次启动前建议依次验证：
+
+```bash
+# 不发送通知，只验证真实 IPO 数据采集和数据库写入
+python3 -m app.main run --dry-run
+
+# 调用所选 LLM 生成虚拟摘要，不发送通知
+python3 -m app.main test-llm
+
+# 若已启用 Telegram / Email 等渠道，发送测试通知
+python3 -m app.main test-notification
+
+# 从真实来源采集 IPO，经 LLM 生成摘要，并发送标记为测试的邮件
+python3 -m app.main test-e2e
+```
+
+在宿主机验证通过后，使用一次性容器复核 Docker 中的完整链路：
+
+```bash
+docker compose run --rm --build hk-ipo-watchdog test-e2e
+```
+
+该命令构建当前镜像，使用 Compose 的 `.env` 与 `config/` 挂载运行真实端到端测试，完成后自动删除测试容器，不会启动常驻调度服务。它同样会调用一次 LLM 并发送一封 `[端到端测试]` 邮件，token 用量通过挂载的 `./data` 保留在宿主机数据库中。
+
+启动后台服务：
 
 ```bash
 docker compose up -d
 ```
+
+`docker-compose.yml` 已配置：
+
+- 容器内默认运行 `python -m app.main run`；其基础镜像为 Python 3.12，因此不受宿主机 `python` 指向 Python 2.7 的影响；
+- `restart: unless-stopped`，进程或机器重启后由 Docker 恢复服务；
+- 将本机 `./config`、`./data`、`./logs` 挂载到容器；
+- 从本机 `.env` 注入 API key 与推送凭据。
+- `.dockerignore` 排除本机 `.env`、真实收件人配置、数据库和日志，避免密钥或本地数据在构建时被复制进镜像。
+- `llm_usage` 存在挂载的 `./data` 数据库中，容器重启后仍可使用 `python3 -m app.main usage llm` 或对应的一次性容器命令查看。
 
 查看日志：
 
@@ -370,18 +450,66 @@ docker compose logs -f
 docker compose down
 ```
 
+更新代码或配置后重建并启动：
+
+```bash
+docker compose up -d --build
+```
+
+### 新增或修改 Email 收件人
+
+编辑本地文件 `config/recipients.yaml`，在列表中添加一个或多个地址：
+
+```yaml
+recipients:
+  email:
+    - "first_receiver@example.com"
+    - "second_receiver@example.com"
+```
+
+`config/` 虽然以 volume 方式挂载到容器，但常驻程序在启动时读取收件人列表，并缓存已创建的邮件发送器。因此修改收件人后需要重启服务：
+
+```bash
+# 仅修改 recipients.yaml，且容器已是最新程序版本
+docker compose restart hk-ipo-watchdog
+
+# 同时需要应用代码更新或新功能
+docker compose up -d --build
+```
+
+重启后发送一封测试邮件，确认列表中的每个邮箱均能收到邮件：
+
+```bash
+docker compose exec -T hk-ipo-watchdog python -m app.main test-notification
+```
+
+该测试会真实向所有已配置收件人发送邮件。新增收件地址不会进入 Git：实际 `config/recipients.yaml` 已由 `.gitignore` 排除，仅公开示例文件会提交。
+
+### 上线前检查
+
+当前仓库配置的实际含义：
+
+- LLM 已设置为 GLM-5.1；必须通过本地 `.env` 提供 `ZHIPU_API_KEY` 才能生成真实 AI 摘要。
+- Telegram 当前关闭；仅在提供 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_CHAT_ID` 后再启用。
+- Email 当前启用；必须同时提供 SMTP 凭据和至少一个 `config/recipients.yaml` 收件地址。
+- 正式库如仍保留早期错误数据源产生的记录，应在长期运行前备份并清理。
+
 ## 命令一览
 
 ```bash
-python -m app.main init-db          # 初始化数据库
-python -m app.main run              # 启动常驻调度服务
-python -m app.main run --dry-run    # 只运行不推送
-python -m app.main collect ipo-calendar --once   # 采集 IPO 日历
-python -m app.main collect announcements --once   # 采集公告
-python -m app.main collect grey-market --once     # 采集暗盘
-python -m app.main strategy scan    # 策略扫描
-python -m app.main digest daily     # 发送日报
-python -m app.main test-notification # 测试推送
+python3 -m app.main init-db          # 初始化数据库
+python3 -m app.main run              # 启动常驻调度服务
+python3 -m app.main run --dry-run    # 只运行不推送
+python3 -m app.main collect ipo-calendar --once   # 采集 IPO 日历
+python3 -m app.main collect announcements --once   # 采集公告
+python3 -m app.main collect grey-market --once     # 采集暗盘
+python3 -m app.main strategy scan    # 策略扫描
+python3 -m app.main digest daily     # 发送日报
+python3 -m app.main test-llm          # 测试 LLM，不发送推送
+python3 -m app.main test-notification # 测试推送
+python3 -m app.main test-e2e          # 拉取真实数据并发送端到端测试邮件
+python3 -m app.main usage llm         # 汇总已记录的 LLM token 用量
+docker compose run --rm --build hk-ipo-watchdog test-e2e # 在一次性容器中验证完整链路
 ```
 
 通用参数：
@@ -445,7 +573,7 @@ cp data/hk_ipo_watchdog.db backups/hk_ipo_watchdog_$(date +%F).db
 ## 注意事项
 
 - 本系统不构成投资建议
-- `provider: mock` 为开发模式，实际提醒应配置真实 LLM 或后续改为规则摘要模式
+- 当前配置使用 GLM-5.1；若未提供有效 `ZHIPU_API_KEY`，真实摘要生成将失败
 - 打新存在破发风险
 - 暗盘数据来源不同，价格可能不同
 - 策略规则需要定期根据市场情况调整

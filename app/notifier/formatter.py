@@ -117,3 +117,18 @@ def format_daily_digest(
 
     body = "\n".join(lines)
     return title, body
+
+
+def append_daily_llm_usage(body: str, usage: dict) -> str:
+    """为邮件正文追加当日 LLM token 汇总。"""
+    lines = [
+        body,
+        "",
+        f"今日 LLM Token 用量 (香港时间 {usage['date']}):",
+        f"  调用次数: {usage['calls']:,}",
+        f"  输入 Token: {usage['prompt_tokens']:,}",
+        f"  输出 Token: {usage['completion_tokens']:,}",
+        f"  缓存命中 Token: {usage['cached_tokens']:,}",
+        f"  总 Token: {usage['total_tokens']:,}",
+    ]
+    return "\n".join(lines)

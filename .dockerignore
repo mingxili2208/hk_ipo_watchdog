@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+config/recipients.yaml
+!config/recipients.example.yaml
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+logs/
+dist/
+build/
+*.egg-info/

@@ -113,7 +113,14 @@ class SchedulerApp:
             if channel_name in delivered:
                 continue
 
-            result = notifier.send(title, body)
+            channel_body = body
+            if channel_name == "email":
+                from app.notifier.formatter import append_daily_llm_usage
+
+                channel_body = append_daily_llm_usage(
+                    body, self.repo.get_llm_usage_for_hk_day()
+                )
+            result = notifier.send(title, channel_body)
             results.append(result)
             if result.success:
                 delivered.add(channel_name)

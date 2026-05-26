@@ -4,34 +4,30 @@ REQUIRED_FIELDS = ["title", "summary", "key_points", "trigger_reasons", "risks",
 VALID_CONFIDENCE = ["low", "medium", "high"]
 
 
-def validate_summary_json(data: dict) -> bool:
-    """校验 LLM 输出是否符合 JSON schema。"""
+def summary_validation_errors(data: dict) -> list[str]:
+    """Return schema validation failures without logging generated content."""
     if not isinstance(data, dict):
-        return False
+        return ["response is not an object"]
 
+    errors = []
     for field in REQUIRED_FIELDS:
         if field not in data:
-            return False
+            errors.append(f"missing field: {field}")
 
-    if not isinstance(data.get("title"), str):
-        return False
+    for field in ("title", "summary", "suggested_action"):
+        if field in data and not isinstance(data[field], str):
+            errors.append(f"field is not a string: {field}")
 
-    if not isinstance(data.get("summary"), str):
-        return False
+    for field in ("key_points", "trigger_reasons", "risks"):
+        if field in data and not isinstance(data[field], list):
+            errors.append(f"field is not a list: {field}")
 
-    if not isinstance(data.get("key_points"), list):
-        return False
+    if "confidence" in data and data["confidence"] not in VALID_CONFIDENCE:
+        errors.append("confidence must be one of: low, medium, high")
 
-    if not isinstance(data.get("trigger_reasons"), list):
-        return False
+    return errors
 
-    if not isinstance(data.get("risks"), list):
-        return False
 
-    if not isinstance(data.get("suggested_action"), str):
-        return False
-
-    if data.get("confidence") not in VALID_CONFIDENCE:
-        return False
-
-    return True
+def validate_summary_json(data: dict) -> bool:
+    """校验 LLM 输出是否符合 JSON schema。"""
+    return not summary_validation_errors(data)
