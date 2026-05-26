@@ -1,0 +1,9 @@
+llm:
+  provider: mock
+  model: gpt-4.1-mini
+  api_key_env: OPENAI_API_KEY
+  base_url: null
+  temperature: 0.2
+  max_tokens: 1200
+  timeout_seconds: 30
+  retry_times: 1

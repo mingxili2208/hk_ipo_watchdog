@@ -1,0 +1,44 @@
+basic:
+  max_entry_fee_hkd: 20000
+  min_market_cap_hkd: 0
+  allowed_markets:
+    - Main Board
+  exclude_industries:
+    - property
+    - traditional retail
+    - loss-making biotech
+
+subscription:
+  min_public_subscription_times: 10
+  prefer_reallocation_triggered: true
+  min_one_lot_success_rate: 5
+
+valuation:
+  max_pe: 40
+  prefer_profitable: true
+
+sponsor:
+  whitelist:
+    - CICC
+    - Morgan Stanley
+    - Goldman Sachs
+    - Haitong International
+  blacklist: []
+
+grey_market:
+  min_grey_gain_percent: 5
+  alert_if_below_percent: -3
+
+scoring:
+  basic_weight: 30
+  subscription_weight: 20
+  allotment_weight: 15
+  grey_market_weight: 20
+  sponsor_weight: 10
+  risk_penalty_max: 30
+
+alerts:
+  watch_score_above: 60
+  important_score_above: 75
+  urgent_score_above: 85
+  only_push_score_above: 60

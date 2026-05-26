@@ -1,0 +1,21 @@
+schedule:
+  ipo_calendar:
+    enabled: true
+    interval_minutes: 10
+
+  hkex_announcements:
+    enabled: true
+    interval_minutes: 5
+
+  allotment_results:
+    enabled: true
+    interval_minutes: 5
+
+  grey_market:
+    enabled: false
+    interval_minutes: 1
+
+  daily_digest:
+    enabled: true
+    time: "21:30"
+    timezone: "Asia/Hong_Kong"

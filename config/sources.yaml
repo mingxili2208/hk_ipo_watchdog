@@ -1,0 +1,40 @@
+sources:
+  hkex_new_listing:
+    enabled: true
+    type: html
+    url: "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=en"
+    interval_minutes: 10
+    save_raw: true
+    timeout_seconds: 20
+
+  hkex_news:
+    enabled: true
+    type: html
+    url: "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=en"
+    interval_minutes: 5
+    lookback_hours: 24
+    save_raw: true
+    timeout_seconds: 20
+
+  aastocks_ipo:
+    enabled: true
+    type: html
+    url: "https://www.aastocks.com/tc/stocks/market/ipo/mainpage.aspx"
+    interval_minutes: 15
+    save_raw: true
+    timeout_seconds: 20
+
+  futu_ipo:
+    enabled: false
+    type: api
+    host: "127.0.0.1"
+    port: 11111
+    interval_minutes: 10
+
+  grey_market:
+    enabled: false
+    sources:
+      - name: "aastocks"
+        url: "https://www.aastocks.com/tc/stocks/market/ipo/greymarket.aspx"
+    interval_minutes: 1
+    timeout_seconds: 20

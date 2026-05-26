@@ -1,0 +1,13 @@
+services:
+  hk-ipo-watchdog:
+    build: .
+    container_name: hk-ipo-watchdog
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Hong_Kong

@@ -1,0 +1,4 @@
+recipients:
+  email:
+    - "your_receiver@example.com"
+    # - "another_receiver@example.com"
