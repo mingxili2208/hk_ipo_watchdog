@@ -13,6 +13,7 @@ class IPOItem(BaseModel):
     stock_name_en: str | None = None
     market: str | None = None
     industry: str | None = None
+    business_overview: str | None = None
 
     status: str = "unknown"
 
@@ -112,6 +113,7 @@ class StrategyDecision(BaseModel):
     trigger_reasons: list[str] = []
     risk_flags: list[str] = []
     missing_fields: list[str] = []
+    score_breakdown: list[str] = []
 
     should_notify: bool = False
     notification_type: str | None = None

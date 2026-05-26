@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 
 from app.models import IPOItem, AllotmentResult, GreyMarketQuote
 from app.strategy.config_loader import StrategyConfig
-from app.strategy.scoring import calculate_score, decide_alert_level, collect_matched_rules, collect_trigger_reasons, collect_risk_flags
+from app.strategy.scoring import calculate_score, decide_alert_level, collect_matched_rules, collect_trigger_reasons, collect_risk_flags, collect_score_breakdown
 from app.strategy.filters import apply_hard_filters
 from app.strategy.rule_engine import evaluate_ipo
 from app.utils.time_utils import today_hk
@@ -75,6 +75,14 @@ class TestCalculateScore:
         config = StrategyConfig()
         score = calculate_score(ipo, config)
         assert 0 <= score <= 100
+
+    def test_score_breakdown_explains_missing_future_inputs(self):
+        ipo = _make_ipo()
+        breakdown = collect_score_breakdown(ipo, StrategyConfig())
+
+        assert any("基础信息:" in item for item in breakdown)
+        assert "认购热度: +0 (缺少配发结果数据)" in breakdown
+        assert "暗盘表现: +0 (缺少暗盘数据)" in breakdown
 
 
 class TestDecideAlertLevel:
@@ -157,3 +165,19 @@ class TestEvaluateIPO:
         decision = evaluate_ipo(ipo, config)
 
         assert decision.notification_key == "02616:new_ipo:2026-05-20"
+
+    def test_grey_market_notification_key_is_stable_within_realert_tier(self):
+        ipo = _make_ipo()
+        config = StrategyConfig()
+        first = _make_grey(change_percent=-4.0).model_copy(
+            update={"quoted_at": datetime(2026, 5, 25, 16, 15)}
+        )
+        second = _make_grey(change_percent=-4.5).model_copy(
+            update={"quoted_at": datetime(2026, 5, 25, 16, 20)}
+        )
+
+        first_decision = evaluate_ipo(ipo, config, grey=first)
+        second_decision = evaluate_ipo(ipo, config, grey=second)
+
+        assert first_decision.notification_key == second_decision.notification_key
+        assert "down_0" in first_decision.notification_key

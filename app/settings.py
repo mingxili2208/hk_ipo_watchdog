@@ -76,13 +76,22 @@ class ScheduleItemSettings(BaseModel):
     interval_minutes: int = 10
     time: str | None = None
     timezone: str = "Asia/Hong_Kong"
+    window_start: str | None = None
+    window_end: str | None = None
+    weekdays_only: bool = False
 
 
 class ScheduleSettings(BaseModel):
     ipo_calendar: ScheduleItemSettings = ScheduleItemSettings(interval_minutes=10)
     hkex_announcements: ScheduleItemSettings = ScheduleItemSettings(interval_minutes=5)
     allotment_results: ScheduleItemSettings = ScheduleItemSettings(enabled=False, interval_minutes=5)
-    grey_market: ScheduleItemSettings = ScheduleItemSettings(enabled=False, interval_minutes=1)
+    grey_market: ScheduleItemSettings = ScheduleItemSettings(
+        enabled=False,
+        interval_minutes=5,
+        window_start="16:15",
+        window_end="18:30",
+        weekdays_only=True,
+    )
     daily_digest: ScheduleItemSettings = ScheduleItemSettings(time="21:30")
 
 

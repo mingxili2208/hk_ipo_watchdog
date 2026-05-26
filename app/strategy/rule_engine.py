@@ -16,7 +16,30 @@ from app.strategy.scoring import (
     collect_matched_rules,
     collect_trigger_reasons,
     collect_risk_flags,
+    collect_score_breakdown,
 )
+
+
+def grey_market_alert_event_key(
+    grey: GreyMarketQuote,
+    config: StrategyConfig,
+) -> str | None:
+    """构造按交易日、方向与显著幅度阶梯去重的暗盘事件 key。"""
+    change = grey.change_percent
+    if change is None or config.grey_market.re_alert_step_percent <= 0:
+        return None
+
+    if change >= config.grey_market.min_grey_gain_percent:
+        distance = change - config.grey_market.min_grey_gain_percent
+        direction = "up"
+    elif change <= config.grey_market.alert_if_below_percent:
+        distance = config.grey_market.alert_if_below_percent - change
+        direction = "down"
+    else:
+        return None
+
+    tier = int(distance // config.grey_market.re_alert_step_percent)
+    return f"grey_{grey.source}_{grey.quoted_at.date()}_{direction}_{tier}"
 
 
 def evaluate_ipo(
@@ -36,6 +59,7 @@ def evaluate_ipo(
     matched_rules = collect_matched_rules(ipo, config, allotment, grey)
     trigger_reasons = collect_trigger_reasons(ipo, config, allotment, grey)
     risk_flags = collect_risk_flags(ipo, allotment, grey)
+    score_breakdown = collect_score_breakdown(ipo, config, allotment, grey)
 
     # 4. 决定等级
     level = decide_alert_level(score, config)
@@ -79,7 +103,7 @@ def evaluate_ipo(
                 else f"allotment_{allotment.stock_code}"
             )
         elif notification_type == "grey_market_breakout" and grey:
-            event_key = f"grey_{grey.source}_{grey.quoted_at.strftime('%Y%m%d%H%M')}"
+            event_key = grey_market_alert_event_key(grey, config) or "grey_threshold"
         elif notification_type == "subscription_deadline":
             event_key = str(ipo.subscription_close_date)
         elif notification_type == "new_ipo":
@@ -98,6 +122,7 @@ def evaluate_ipo(
         trigger_reasons=trigger_reasons,
         risk_flags=risk_flags,
         missing_fields=missing,
+        score_breakdown=score_breakdown,
         should_notify=should_notify,
         notification_type=notification_type,
         notification_key=notification_key,

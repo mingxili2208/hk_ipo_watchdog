@@ -13,8 +13,13 @@ schedule:
     interval_minutes: 5
 
   grey_market:
+    # Disabled: AAStocks HTML contains quote placeholders; live values need dynamic retrieval.
     enabled: false
-    interval_minutes: 1
+    interval_minutes: 5
+    timezone: "Asia/Hong_Kong"
+    window_start: "16:15"
+    window_end: "18:30"
+    weekdays_only: true
 
   daily_digest:
     enabled: true

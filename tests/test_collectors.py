@@ -5,7 +5,7 @@ from datetime import timedelta
 from app.collectors.aastocks_ipo import AAStocksIPOCollector
 from app.collectors.base import RawFetchResult
 from app.collectors.grey_market import GreyMarketCollector
-from app.collectors.hkex_new_listing import HKEXNewListingCollector
+from app.collectors.hkex_new_listing import HKEXNewListingCollector, _extract_business_overview
 from app.collectors.hkex_news import HKEXNewsCollector
 from app.utils.time_utils import today_hk
 
@@ -57,7 +57,7 @@ def test_hkex_official_listing_page_keeps_closed_unlisted_ipo_for_tracking():
     html = """
     <table>
       <tr><th>Stock Code</th><th>Stock Name</th><th>NEW LISTING ANNOUNCEMENTS</th><th>PROSPECTUSES</th><th>ALLOTMENT RESULTS</th></tr>
-      <tr><td>3388</td><td>Creality</td><td><a href="/open.pdf">Download</a></td><td></td><td></td></tr>
+      <tr><td>3388</td><td>Creality</td><td><a href="/open.pdf">Download</a></td><td><a href="/prospectus.pdf">Download</a></td><td></td></tr>
       <tr><td>0901</td><td>Closed</td><td><a href="/closed.pdf">Download</a></td><td></td><td></td></tr>
     </table>
     """
@@ -85,7 +85,23 @@ def test_hkex_official_listing_page_keeps_closed_unlisted_ipo_for_tracking():
     assert item.offer_price_max == 18.8
     assert item.lot_size == 150
     assert item.entry_fee_hkd == 2848.44
+    assert item.raw_sources["hkex_new_listing"]["prospectus_url"] == "https://example.test/prospectus.pdf"
     assert items[1].status == "subscription_closed"
+
+
+def test_hkex_prospectus_extracts_short_business_overview():
+    text = """
+    CONTENTS OVERVIEW
+    OVERVIEW
+    We are a global consumer 3D printing product and service provider. Our products
+    and services primarily include 3D printers, consumables and scanners. We also
+    operate unrelated later details that should not be included.
+    """
+
+    overview = _extract_business_overview(text)
+
+    assert overview == "We are a global consumer 3D printing product and service provider."
+    assert "later details" not in overview
 
 
 def test_hkex_news_collects_allotment_code_and_document_text():

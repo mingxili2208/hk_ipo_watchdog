@@ -50,6 +50,11 @@ def main():
         choices=["daily"],
         help="日报类型",
     )
+    digest_parser.add_argument(
+        "--resend",
+        action="store_true",
+        help="补发当日日报，保留原发送记录并以补发记录单独追踪",
+    )
     digest_parser.add_argument("--config-dir", default="config", help="配置目录路径")
     digest_parser.add_argument("--log-level", default="INFO", help="日志级别")
 
@@ -103,7 +108,7 @@ def main():
     elif args.command == "strategy":
         _cmd_strategy(settings, action=args.action)
     elif args.command == "digest":
-        _cmd_digest(settings, dtype=args.type)
+        _cmd_digest(settings, dtype=args.type, resend=args.resend)
     elif args.command == "test-notification":
         _cmd_test_notification(settings)
     elif args.command == "test-llm":
@@ -209,7 +214,7 @@ def _cmd_collect(settings, source: str, once: bool = False) -> None:
             llm_service=llm_service,
             repository=repo,
         )
-        app.job_collect_grey_market()
+        app.job_collect_grey_market(ignore_window=True)
 
     logger.info(f"Collect {source} completed")
 
@@ -242,7 +247,7 @@ def _cmd_strategy(settings, action: str) -> None:
         logger.info("Strategy scan completed")
 
 
-def _cmd_digest(settings, dtype: str) -> None:
+def _cmd_digest(settings, dtype: str, resend: bool = False) -> None:
     """日报操作。"""
     from app.storage.db import init_db
     from app.storage.repository import Repository
@@ -262,7 +267,7 @@ def _cmd_digest(settings, dtype: str) -> None:
         llm_service=llm_service,
         repository=repo,
     )
-    app.job_send_daily_digest()
+    app.job_send_daily_digest(resend=resend)
 
 
 def _cmd_test_notification(settings) -> None:

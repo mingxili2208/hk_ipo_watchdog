@@ -3,14 +3,14 @@
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import create_engine, inspect, text
 
 from app.main import _cmd_init_db, _cmd_test_e2e, _cmd_test_llm, _cmd_test_notification
 from app.models import IPOItem
 from app.notifier.base import SendResult
 from app.settings import Settings
 from app.storage.models import LLMUsageORM, NotificationORM
-from app.storage.db import get_engine, get_session
+from app.storage.db import get_engine, get_session, init_db
 
 
 class FakeLLMProvider:
@@ -45,6 +45,20 @@ def test_init_db_registers_llm_usage_table():
     _cmd_init_db(Settings(database_url="sqlite:///:memory:"))
 
     assert "llm_usage" in inspect(get_engine()).get_table_names()
+
+
+def test_init_db_adds_business_overview_column_to_existing_sqlite_database(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy.db'}"
+    legacy_engine = create_engine(database_url)
+    with legacy_engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE ipo_items (id INTEGER PRIMARY KEY, stock_code TEXT UNIQUE NOT NULL)")
+        )
+
+    init_db(database_url)
+
+    columns = {column["name"] for column in inspect(get_engine()).get_columns("ipo_items")}
+    assert "business_overview" in columns
 
 
 def test_test_llm_validates_synthetic_response_without_notification():

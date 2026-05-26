@@ -17,6 +17,7 @@ class IPOItem(BaseModel):
     stock_name_en: str | None = None
     market: str | None = None
     industry: str | None = None
+    business_overview: str | None = None
 
     status: str = "unknown"
 
@@ -52,6 +53,7 @@ class IPOItem(BaseModel):
 | `stock_name_en` | str | 英文名称 |
 | `market` | str | Main Board / GEM 等 |
 | `industry` | str | 行业 |
+| `business_overview` | str | HKEX 官方招股章程 `OVERVIEW` 首句提取的主营业务短摘要（最长 320 字符） |
 | `status` | str | 生命周期状态 |
 | `subscription_start_date` | date | 招股开始日期 |
 | `subscription_close_date` | date | 招股截止日期 |
@@ -156,6 +158,7 @@ class StrategyDecision(BaseModel):
     trigger_reasons: list[str] = []
     risk_flags: list[str] = []
     missing_fields: list[str] = []
+    score_breakdown: list[str] = []
 
     should_notify: bool = False
     notification_type: str | None = None
@@ -228,6 +231,7 @@ CREATE TABLE ipo_items (
     stock_name_en TEXT,
     market TEXT,
     industry TEXT,
+    business_overview TEXT,
     status TEXT,
 
     subscription_start_date DATE,
@@ -452,12 +456,15 @@ sources:
     interval_minutes: 10
 
   grey_market:
+    # 暂时关闭，等待 AAStocks 动态实时报价适配
     enabled: false
     sources:
       - name: "aastocks"
         url: "https://example.com/grey-market"
-    interval_minutes: 1
+    interval_minutes: 5
 ```
+
+实现说明：当前运行代码可读取 `save_raw` 配置，但尚未将 HTTP 原始响应持久化至 `data/raw/`；该字段属于后续存档/回放能力的接口预留。
 
 ## 4.2 `config/strategy.yaml`
 
@@ -493,6 +500,7 @@ sponsor:
 grey_market:
   min_grey_gain_percent: 5
   alert_if_below_percent: -3
+  re_alert_step_percent: 5
 
 scoring:
   basic_weight: 30
@@ -586,8 +594,13 @@ schedule:
     interval_minutes: 5
 
   grey_market:
+    # 当前运行配置关闭，保留下列窗口参数供完成适配后使用
     enabled: false
-    interval_minutes: 1
+    interval_minutes: 5
+    timezone: "Asia/Hong_Kong"
+    window_start: "16:15"
+    window_end: "18:30"
+    weekdays_only: true
 
   daily_digest:
     enabled: true

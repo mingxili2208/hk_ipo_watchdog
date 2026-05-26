@@ -36,6 +36,9 @@ def format_notification(
     if ipo and ipo.status:
         lines.append(f"状态: {status_map.get(ipo.status, ipo.status)}")
 
+    if ipo and ipo.business_overview:
+        lines.append(f"主营业务 (官方章程摘要): {ipo.business_overview}")
+
     if ipo and ipo.entry_fee_hkd:
         lines.append(f"入场费: HKD {ipo.entry_fee_hkd:,.2f}")
 
@@ -86,6 +89,7 @@ def format_notification(
 def format_daily_digest(
     summary: LLMSummary,
     events: list[dict],
+    follow_ups: list[dict] | None = None,
 ) -> tuple[str, str]:
     """格式化每日汇总。"""
     title = summary.title
@@ -99,6 +103,94 @@ def format_daily_digest(
             etype = ev.get("event_type", "")
             ev_title = ev.get("title", "")
             lines.append(f"  - [{etype}] {code} {ev_title}")
+            ipo = ev.get("ipo") or {}
+            if ipo:
+                status_map = {
+                    "subscription_open": "招股中",
+                    "subscription_closed": "已截止认购",
+                    "allotment_result_published": "配发结果已公布",
+                    "listed": "已上市",
+                }
+                schedule = []
+                if ipo.get("subscription_start_date") or ipo.get("subscription_close_date"):
+                    schedule.append(
+                        f"招股: {ipo.get('subscription_start_date', '-')} 至 "
+                        f"{ipo.get('subscription_close_date', '-')}"
+                    )
+                if ipo.get("listing_date"):
+                    schedule.append(f"上市: {ipo['listing_date']}")
+                if schedule:
+                    lines.append(f"      {' | '.join(schedule)}")
+
+                terms = []
+                price_min = ipo.get("offer_price_min")
+                price_max = ipo.get("offer_price_max")
+                if price_min is not None and price_max is not None:
+                    price = (
+                        f"HKD {price_min:,.2f}"
+                        if price_min == price_max
+                        else f"HKD {price_min:,.2f}-{price_max:,.2f}"
+                    )
+                    terms.append(f"发售价: {price}")
+                if ipo.get("lot_size") is not None:
+                    terms.append(f"每手: {ipo['lot_size']:,} 股")
+                if ipo.get("entry_fee_hkd") is not None:
+                    terms.append(f"入场费: HKD {ipo['entry_fee_hkd']:,.2f}")
+                if terms:
+                    lines.append(f"      {' | '.join(terms)}")
+
+                metadata = []
+                if ipo.get("industry"):
+                    metadata.append(f"行业: {ipo['industry']}")
+                status = status_map.get(ipo.get("status"), ipo.get("status"))
+                if status:
+                    metadata.append(f"状态: {status}")
+                if metadata:
+                    lines.append(f"      {' | '.join(metadata)}")
+                if ipo.get("business_overview"):
+                    lines.append(f"      主营业务 (官方章程摘要): {ipo['business_overview']}")
+
+            score = ev.get("strategy_score") or {}
+            if score:
+                score_value = score.get("score")
+                level_value = score.get("level")
+                level_name = _LEVEL_NAMES.get(level_value, "未知")
+                score_line = f"评分: {score_value}/100 | 等级: {level_name}"
+                push_threshold = score.get("push_score_threshold")
+                if (
+                    score_value is not None
+                    and push_threshold is not None
+                    and score_value < push_threshold
+                ):
+                    score_line += f" | 未达到普通推送线 {push_threshold}"
+                lines.append(f"      {score_line}")
+                if score.get("score_breakdown"):
+                    lines.append("      评分依据:")
+                    for reason in score["score_breakdown"]:
+                        lines.append(f"        - {reason}")
+                if score.get("risk_flags"):
+                    lines.append(f"      风险标记: {'；'.join(score['risk_flags'])}")
+
+    if follow_ups:
+        lines.append("")
+        lines.append(f"持续跟踪 ({len(follow_ups)} 只):")
+        for item in follow_ups:
+            ipo = item.get("ipo") or {}
+            code = item.get("stock_code", "")
+            name = ipo.get("stock_name", "")
+            days = item.get("days_to_listing")
+            listing_date = ipo.get("listing_date", "-")
+            if days == 0:
+                countdown = "今日上市"
+            else:
+                countdown = f"距离上市还有 {days} 天"
+            lines.append(f"  - {code} {name}: {countdown} (上市日: {listing_date})")
+            if ipo.get("business_overview"):
+                lines.append(f"      主营业务 (官方章程摘要): {ipo['business_overview']}")
+            if item.get("detail_digest_date"):
+                lines.append(f"      详细招股信息见 {item['detail_digest_date']} 日报")
+            else:
+                lines.append(f"      首次发现于 {item.get('discovered_on', '-')}，未确认存在已送达的详情日报")
 
     if summary.key_points:
         lines.append("")

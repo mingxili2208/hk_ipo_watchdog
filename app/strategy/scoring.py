@@ -23,6 +23,62 @@ def calculate_score(
     return max(0, min(100, score))
 
 
+def collect_score_breakdown(
+    ipo: IPOItem,
+    config: StrategyConfig,
+    allotment: AllotmentResult | None = None,
+    grey: GreyMarketQuote | None = None,
+) -> list[str]:
+    """生成与综合评分一致的可读分项说明。"""
+    breakdown = []
+
+    basic_score = _score_basic(ipo, config)
+    basic_signals = []
+    if ipo.entry_fee_hkd:
+        if ipo.entry_fee_hkd <= 5000:
+            basic_signals.append("入场费不高于 HKD 5,000")
+        elif ipo.entry_fee_hkd <= 10000:
+            basic_signals.append("入场费不高于 HKD 10,000")
+        elif ipo.entry_fee_hkd <= 20000:
+            basic_signals.append("入场费不高于 HKD 20,000")
+    if ipo.market_cap_hkd and ipo.market_cap_hkd >= 1_000_000_000:
+        basic_signals.append("市值不少于 HKD 10 亿")
+    if ipo.industry and ipo.industry.lower() not in [i.lower() for i in config.basic.exclude_industries]:
+        basic_signals.append("行业未列入排除清单")
+    if basic_score or basic_signals:
+        breakdown.append(f"基础信息: +{basic_score} ({'；'.join(basic_signals)})")
+
+    subscription_score = _score_subscription(allotment, config)
+    if allotment and allotment.public_subscription_times:
+        breakdown.append(
+            f"认购热度: +{subscription_score} (公开发售超购 {allotment.public_subscription_times:g} 倍)"
+        )
+    else:
+        breakdown.append("认购热度: +0 (缺少配发结果数据)")
+
+    allotment_score = _score_allotment_structure(allotment, config)
+    if allotment:
+        breakdown.append(f"配发结构: +{allotment_score} (依据已解析配发字段)")
+    else:
+        breakdown.append("配发结构: +0 (缺少配发结果数据)")
+
+    grey_score = _score_grey_market(grey, config)
+    if grey and grey.change_percent is not None:
+        breakdown.append(f"暗盘表现: +{grey_score} (涨跌幅 {grey.change_percent:.1f}%)")
+    else:
+        breakdown.append("暗盘表现: +0 (缺少暗盘数据)")
+
+    sponsor_score = _score_sponsor(ipo, config)
+    if ipo.sponsors:
+        breakdown.append(f"保荐人: +{sponsor_score} ({'、'.join(ipo.sponsors)})")
+
+    risk_penalty = _score_risks(ipo, allotment, config)
+    if risk_penalty:
+        breakdown.append(f"风险扣分: -{risk_penalty}")
+
+    return breakdown
+
+
 def decide_alert_level(score: int, config: StrategyConfig) -> int:
     """根据分数决定提醒等级。"""
     if score >= config.alerts.urgent_score_above:

@@ -29,6 +29,7 @@ class IPOItemORM(Base):
     stock_name_en: Mapped[str | None] = mapped_column(Text)
     market: Mapped[str | None] = mapped_column(Text)
     industry: Mapped[str | None] = mapped_column(Text)
+    business_overview: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str | None] = mapped_column(Text, default="unknown")
 
     subscription_start_date = Column(Text)

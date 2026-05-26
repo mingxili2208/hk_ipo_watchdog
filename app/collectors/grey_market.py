@@ -1,7 +1,5 @@
 """暗盘数据采集器。"""
 
-from datetime import datetime
-
 from bs4 import BeautifulSoup
 from loguru import logger
 
@@ -9,6 +7,7 @@ from app.collectors.base import BaseCollector, RawFetchResult, fetch_url
 from app.exceptions import FetchError
 from app.models import GreyMarketQuote
 from app.parsers.normalizer import normalize_hk_code, normalize_percent, normalize_money
+from app.utils.time_utils import now_hk
 
 
 class GreyMarketCollector(BaseCollector):
@@ -90,7 +89,7 @@ class GreyMarketCollector(BaseCollector):
                         offer_price=d.get("offer_price"),
                         change_percent=d.get("change_percent"),
                         turnover_hkd=d.get("turnover_hkd"),
-                        quoted_at=datetime.now(),
+                        quoted_at=now_hk(),
                         source_url=url,
                         raw_fields=d.get("raw_fields", {}),
                     )

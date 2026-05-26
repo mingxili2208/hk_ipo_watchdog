@@ -72,6 +72,10 @@ class HKEXNewListingCollector(BaseCollector):
         reader = PdfReader(BytesIO(raw.content or b""))
         return "\n".join(page.extract_text() or "" for page in reader.pages)
 
+    def fetch_business_overview(self, prospectus_url: str) -> str | None:
+        """从官方招股章程抽取适合在日报展示的短业务摘要。"""
+        return _extract_business_overview(self._fetch_document_text(prospectus_url))
+
 
 def _official_offering_rows(raw: RawFetchResult) -> list[dict[str, str]]:
     soup = BeautifulSoup(raw.text, "lxml")
@@ -87,15 +91,19 @@ def _official_offering_rows(raw: RawFetchResult) -> list[dict[str, str]]:
             link = cells[2].find("a", href=True)
             if not link:
                 continue
+            prospectus_link = cells[3].find("a", href=True) if len(cells) > 3 else None
             try:
                 code = normalize_hk_code(cells[0].get_text(" ", strip=True))
             except ValueError:
                 continue
-            rows.append({
+            row = {
                 "stock_code": code,
                 "stock_name": cells[1].get_text(" ", strip=True),
                 "announcement_url": urljoin(raw.url, link["href"]),
-            })
+            }
+            if prospectus_link:
+                row["prospectus_url"] = urljoin(raw.url, prospectus_link["href"])
+            rows.append(row)
         return rows
     return []
 
@@ -133,8 +141,33 @@ def _parse_offering_announcement(row: dict[str, str], text: str) -> IPOItem | No
         lot_size=lot_size,
         entry_fee_hkd=entry_fee,
         source="hkex_new_listing",
-        raw_sources={"hkex_new_listing": {"announcement_url": row["announcement_url"]}},
+        raw_sources={
+            "hkex_new_listing": {
+                "announcement_url": row["announcement_url"],
+                "prospectus_url": row.get("prospectus_url"),
+            }
+        },
     )
+
+
+def _extract_business_overview(text: str) -> str | None:
+    """提取章程 Business Overview 首句，保持日报仅展示摘要。"""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    match = re.search(r"\bOVERVIEW\s+(We are\b.{20,2000})", normalized, re.IGNORECASE)
+    if not match:
+        return None
+    return summarize_business_overview(match.group(1))
+
+
+def summarize_business_overview(text: str) -> str | None:
+    """将已抽取的官方业务说明收敛为一行首句摘要。"""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    summary = re.split(r"(?<=\.)\s+(?=[A-Z])", normalized)[0].strip()
+    if len(summary) < 40:
+        return None
+    if len(summary) > 320:
+        summary = summary[:317].rsplit(" ", 1)[0] + "..."
+    return summary
 
 
 def _extract_date(text: str, label: str) -> date | None:

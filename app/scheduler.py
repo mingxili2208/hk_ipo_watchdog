@@ -199,6 +199,39 @@ class SchedulerApp:
         )
         return decision
 
+    def _enrich_business_overview(self, ipo: IPOItem) -> IPOItem:
+        """对缺失主营摘要的 IPO 从官方章程补充一次短概览。"""
+        if ipo.business_overview:
+            from app.collectors.hkex_new_listing import summarize_business_overview
+
+            shortened = summarize_business_overview(ipo.business_overview)
+            if shortened and shortened != ipo.business_overview:
+                ipo = ipo.model_copy(update={"business_overview": shortened})
+                self.repo.upsert_ipo(ipo)
+                logger.info(f"IPO business overview shortened: {ipo.stock_code}")
+            return ipo
+        official = (ipo.raw_sources or {}).get("hkex_new_listing") or {}
+        prospectus_url = official.get("prospectus_url")
+        if not prospectus_url:
+            return ipo
+
+        try:
+            from app.collectors.hkex_new_listing import HKEXNewListingCollector
+
+            source_settings = self.settings.sources.hkex_new_listing
+            collector = HKEXNewListingCollector(timeout=source_settings.timeout_seconds)
+            overview = collector.fetch_business_overview(prospectus_url)
+            if not overview:
+                logger.warning(f"No IPO business overview extracted: {ipo.stock_code}")
+                return ipo
+            enriched = ipo.model_copy(update={"business_overview": overview})
+            self.repo.upsert_ipo(enriched)
+            logger.info(f"IPO business overview enriched: {ipo.stock_code}")
+            return self.repo.get_ipo_by_code(ipo.stock_code) or enriched
+        except Exception as e:
+            logger.warning(f"IPO business overview enrichment failed for {ipo.stock_code}: {e}")
+            return ipo
+
     def job_collect_ipo_calendar(self) -> None:
         """定时采集 IPO 日历。"""
         logger.info("Job: collect_ipo_calendar started")
@@ -209,6 +242,12 @@ class SchedulerApp:
             for item in items:
                 result = self.repo.upsert_ipo(item)
                 stored_item = self.repo.get_ipo_by_code(item.stock_code) or item
+                stored_item = self._enrich_business_overview(stored_item)
+                changed_fields = [
+                    field
+                    for field in result.changed_fields
+                    if field not in {"raw_sources", "business_overview"}
+                ]
                 if result.created:
                     created_codes.add(stored_item.stock_code)
                     if stored_item.status == "subscription_open":
@@ -221,19 +260,19 @@ class SchedulerApp:
                         )
                     else:
                         logger.info(f"IPO seeded for lifecycle tracking: {stored_item.stock_code} ({stored_item.status})")
-                elif result.changed_fields and stored_item.stock_code not in created_codes:
-                    logger.info(f"IPO updated: {stored_item.stock_code}, changed: {result.changed_fields}")
+                elif changed_fields and stored_item.stock_code not in created_codes:
+                    logger.info(f"IPO updated: {stored_item.stock_code}, changed: {changed_fields}")
                     update_tag = (
                         stored_item.updated_at.isoformat()
                         if stored_item.updated_at
-                        else "_".join(result.changed_fields)
+                        else "_".join(changed_fields)
                     )
                     self.repo.add_event(
                         stock_code=stored_item.stock_code,
                         event_type="ipo_updated",
                         event_key=f"ipo_updated_{stored_item.stock_code}_{update_tag}",
                         title=f"IPO 信息更新: {stored_item.stock_code} {stored_item.stock_name or ''}",
-                        detail={"changed_fields": result.changed_fields},
+                        detail={"changed_fields": changed_fields},
                     )
 
                 allotment = self.repo.get_latest_allotment(stored_item.stock_code)
@@ -286,12 +325,21 @@ class SchedulerApp:
         except Exception as e:
             logger.error(f"Job: collect_announcements failed: {e}")
 
-    def job_collect_grey_market(self) -> None:
+    def job_collect_grey_market(self, ignore_window: bool = False) -> None:
         """定时采集暗盘。"""
+        if not ignore_window and not self._in_grey_market_window():
+            logger.debug("Job: collect_grey_market skipped outside configured market window")
+            return
+
         logger.info("Job: collect_grey_market started")
         try:
+            from app.strategy.rule_engine import grey_market_alert_event_key
+
             active_ipos = self.repo.get_active_ipos()
             stock_codes = [ipo.stock_code for ipo in active_ipos]
+            if not stock_codes:
+                logger.debug("Job: collect_grey_market skipped with no active IPOs")
+                return
 
             quotes = self._collect_grey_market(stock_codes)
             for quote in quotes:
@@ -299,17 +347,12 @@ class SchedulerApp:
                 ipo = self.repo.get_ipo_by_code(quote.stock_code)
                 if not ipo:
                     continue
-                if (
-                    quote.change_percent is not None
-                    and (
-                        quote.change_percent >= self.strategy_config.grey_market.min_grey_gain_percent
-                        or quote.change_percent <= self.strategy_config.grey_market.alert_if_below_percent
-                    )
-                ):
+                alert_event_key = grey_market_alert_event_key(quote, self.strategy_config)
+                if alert_event_key:
                     self.repo.add_event(
                         stock_code=quote.stock_code,
                         event_type="grey_market_breakout",
-                        event_key=f"grey_{quote.stock_code}_{quote.source}_{quote.quoted_at.strftime('%Y%m%d%H%M')}",
+                        event_key=f"{quote.stock_code}_{alert_event_key}",
                         title=f"暗盘异动: {quote.stock_code} {quote.change_percent:.1f}%",
                     )
                 self._evaluate_and_notify(ipo, self.repo.get_latest_allotment(quote.stock_code), quote)
@@ -318,25 +361,53 @@ class SchedulerApp:
         except Exception as e:
             logger.error(f"Job: collect_grey_market failed: {e}")
 
-    def job_send_daily_digest(self) -> None:
+    def _in_grey_market_window(self) -> bool:
+        """判断是否位于配置的香港暗盘采集时段。"""
+        from datetime import time
+        from app.utils.time_utils import now_hk
+
+        sched = self.settings.schedule.grey_market
+        current = now_hk()
+        if sched.weekdays_only and current.weekday() >= 5:
+            return False
+        if not sched.window_start or not sched.window_end:
+            return True
+
+        start = time.fromisoformat(sched.window_start)
+        end = time.fromisoformat(sched.window_end)
+        current_time = current.time().replace(tzinfo=None)
+        if start <= end:
+            return start <= current_time <= end
+        return current_time >= start or current_time <= end
+
+    def job_send_daily_digest(self, resend: bool = False) -> None:
         """每日汇总推送。"""
         logger.info("Job: send_daily_digest started")
         try:
-            from app.utils.time_utils import today_hk
+            from app.utils.time_utils import now_hk, today_hk
             from app.utils.dedup import make_notification_key
 
             event_key = str(today_hk())
-            notif_key = make_notification_key("digest", "daily_digest", event_key)
-            if self.repo.has_notification_been_sent(notif_key):
-                logger.info(f"Daily digest already sent, skipping: {notif_key}")
+            daily_key = make_notification_key("digest", "daily_digest", event_key)
+            if not resend and self.repo.has_notification_been_sent(daily_key):
+                logger.info(f"Daily digest already sent, skipping: {daily_key}")
                 return
+            notif_key = (
+                f"{daily_key}:resend:{now_hk().strftime('%H%M%S%f')}"
+                if resend
+                else daily_key
+            )
 
-            events = self.repo.get_today_events()
-            summary = self.llm_service.summarize_daily_digest(events)
+            events = self._attach_digest_scores(self.repo.get_today_events())
+            follow_ups = self.repo.get_ipo_follow_ups_for_digest()
+            summary = self.llm_service.summarize_daily_digest(events + follow_ups)
             self.repo.save_llm_summary(None, notif_key, summary)
 
             from app.notifier.formatter import format_daily_digest
-            title, body = format_daily_digest(summary, events)
+            title, body = format_daily_digest(summary, events, follow_ups)
+            if resend:
+                title = f"[补发] {title}"
+                body = f"补发说明: 本邮件为 {event_key} 日报的更新补发版本。\n\n{body}"
 
             self._send_notification(
                 title=title,
@@ -347,9 +418,36 @@ class SchedulerApp:
                 notification_type="daily_digest",
             )
 
-            logger.info("Job: send_daily_digest done")
+            logger.info(f"Job: send_daily_digest done{' (resend)' if resend else ''}")
         except Exception as e:
             logger.error(f"Job: send_daily_digest failed: {e}")
+
+    def _attach_digest_scores(self, events: list[dict]) -> list[dict]:
+        """用日报生成时的最新入库数据为事件补充策略评分。"""
+        from app.strategy.rule_engine import evaluate_ipo
+
+        decisions: dict[str, StrategyDecision] = {}
+        for event in events:
+            stock_code = event.get("stock_code")
+            if not stock_code:
+                continue
+            decision = decisions.get(stock_code)
+            if decision is None:
+                ipo = self.repo.get_ipo_by_code(stock_code)
+                if not ipo:
+                    continue
+                decision = evaluate_ipo(
+                    ipo,
+                    self.strategy_config,
+                    self.repo.get_latest_allotment(stock_code),
+                    self.repo.get_latest_grey_quote(stock_code),
+                )
+                self.repo.save_strategy_score(decision)
+                decisions[stock_code] = decision
+            score_payload = decision.model_dump(mode="json")
+            score_payload["push_score_threshold"] = self.strategy_config.alerts.only_push_score_above
+            event["strategy_score"] = score_payload
+        return events
 
     def _collect_all_ipo_sources(self) -> list:
         """从所有启用的数据源采集 IPO 日历。"""

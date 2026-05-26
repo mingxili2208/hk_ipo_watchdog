@@ -35,6 +35,7 @@ class SponsorConfig(BaseModel):
 class GreyMarketConfig(BaseModel):
     min_grey_gain_percent: float = 5
     alert_if_below_percent: float = -3
+    re_alert_step_percent: float = 5
 
 
 class ScoringConfig(BaseModel):

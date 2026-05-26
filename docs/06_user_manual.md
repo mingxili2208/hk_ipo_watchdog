@@ -141,8 +141,9 @@ sources:
     interval_minutes: 15
 
   grey_market:
+    # 当前关闭：AAStocks 实时暗盘值由动态行情通道填充
     enabled: false
-    interval_minutes: 1
+    interval_minutes: 5
 ```
 
 MVP 阶段建议：
@@ -151,7 +152,7 @@ MVP 阶段建议：
 hkex_new_listing: enabled
 hkex_news: enabled
 aastocks_ipo: enabled
-grey_market: disabled
+grey_market: disabled（待动态行情接口适配完成后启用）
 ```
 
 ## 4.3 配置策略
@@ -181,6 +182,7 @@ subscription:
 grey_market:
   min_grey_gain_percent: 5
   alert_if_below_percent: -3
+  re_alert_step_percent: 5
 
 alerts:
   watch_score_above: 60
@@ -198,6 +200,7 @@ alerts:
 | `min_one_lot_success_rate` | 最低一手中签率 |
 | `min_grey_gain_percent` | 暗盘上涨提醒阈值 |
 | `alert_if_below_percent` | 暗盘下跌风险提醒 |
+| `re_alert_step_percent` | 已提醒后同方向至少再变化多少个百分点才重发 |
 | `only_push_score_above` | 低于该分数不推送 |
 
 ## 4.4 配置 LLM
@@ -350,7 +353,9 @@ python3 -m app.main usage llm
 python3 -m app.main run
 ```
 
-该命令在前台启动定时调度。`config/schedule.yaml` 默认每 10 分钟采集 IPO 日历、每 5 分钟采集 HKEX 公告（其中已包含配发结果），每天香港时间 21:30 生成日报。`allotment_results` 独立任务默认关闭，避免与公告采集重复请求同一来源。
+该命令在前台启动定时调度。`config/schedule.yaml` 默认每 10 分钟采集 IPO 日历、每 5 分钟采集 HKEX 公告（其中已包含配发结果），并在每天香港时间 21:30 生成日报。`allotment_results` 独立任务默认关闭，避免与公告采集重复请求同一来源；暗盘自动采集当前同样关闭。
+
+2026-05-26 的真实运行检查确认：AAStocks 暗盘页面的 HTML 只含价格占位节点，实时值由动态行情通道填充；现有静态解析器无法取得可用报价。因此不要把 `0 quotes` 视为没有行情。后续应在独立分支适配动态读取后，再使用交易窗口、5 分钟轮询及涨跌幅阶梯去重等保护逻辑。
 
 ## 5.8 Docker 运行
 
@@ -402,6 +407,8 @@ python3 -m app.main collect announcements
 python3 -m app.main collect grey-market
 ```
 
+该命令目前仅用于开发诊断，不能用于判断真实暗盘行情；静态页面采集得到 `0 quotes` 并不证明当时没有报价。
+
 ## 6.4 手动跑策略扫描
 
 ```bash
@@ -412,7 +419,16 @@ python3 -m app.main strategy scan
 
 ```bash
 python3 -m app.main digest daily
+
+# 当日日报成功发送后，补发一次包含新增/修正字段的更新版
+python3 -m app.main digest daily --resend
 ```
+
+日报邮件会把今日事件关联至数据库中已保存的 IPO 快照，直接列出招股起止日、上市日、发售价、每手股数、入场费、可用行业字段及主营业务短摘要。主营业务来自 HKEX 官方招股章程 `PROSPECTUSES` PDF 的 `OVERVIEW` 首句，系统只在缺失时提取一次并限制为最长 320 字符，避免反复下载长 PDF 或将长篇原文塞入邮件。邮件发送前会按最新数据重新评分，并逐只列出总分、提醒等级、普通推送线和评分分项；例如配发结果或暗盘数据尚不可用时，对应分项会明确显示为 `+0`。
+
+某股票在首次发现日报中出现后，只要它已有上市日期且仍待上市，后续日报就会在“持续跟踪”部分显示主营业务短摘要及距离上市日的剩余天数，并提示完整招股详情见哪一天的首次发现日报。缺少上市日期、已经上市或已归档的记录不会加入这部分。未被来源解析或尚未公布的字段不会由 LLM 补造。
+
+普通 `digest daily` 保持每日一次的去重约束。需要在当日补充发送更新后的日报时，使用 `--resend`；补发邮件标题带有 `[补发]`，投递记录使用独立键保存，不覆盖原日报。每运行一次 `--resend` 都会实际再发送一次邮件。
 
 ## 6.6 Dry Run
 
@@ -579,11 +595,19 @@ docker compose logs -f
 python3 -m app.main collect ipo-calendar --log-level DEBUG
 ```
 
-查看 raw data：
+当前可查看结构化入库结果与完整 DEBUG 日志：
 
 ```bash
-ls data/raw/
+tail -f logs/app.log
+python3 - <<'PY'
+import sqlite3
+db = sqlite3.connect("data/hk_ipo_watchdog.db")
+for row in db.execute("SELECT stock_code, stock_name, status, business_overview, updated_at FROM ipo_items ORDER BY updated_at DESC LIMIT 20"):
+    print(row)
+PY
 ```
+
+注意：`config/sources.yaml` 中虽然存在 `save_raw` 配置字段，但当前采集器尚未将原始 HTTP 响应保存到 `data/raw/`，因此无法通过该目录回放历史网页。
 
 ### 问题 4：重复推送
 
@@ -609,6 +633,8 @@ cp data/hk_ipo_watchdog.db backups/hk_ipo_watchdog_$(date +%F).db
 ```
 
 Docker 可以将 `data/` 挂载为 volume。
+
+当前数据库持久化结构化 IPO、公告、配发、评分、LLM 摘要/token 用量及通知记录；`logs/app.log` 保存包括 DEBUG 级解析问题在内的运行轨迹。原始网页内容落盘属于待实现能力。
 
 ## 11. 升级建议
 

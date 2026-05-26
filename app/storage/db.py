@@ -1,6 +1,6 @@
 """数据库初始化和连接管理。"""
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from loguru import logger
@@ -25,6 +25,12 @@ def init_db(database_url: str = "sqlite:///data/hk_ipo_watchdog.db") -> None:
     _SessionFactory = sessionmaker(bind=_engine)
 
     Base.metadata.create_all(_engine)
+    if database_url.startswith("sqlite"):
+        columns = {column["name"] for column in inspect(_engine).get_columns("ipo_items")}
+        if "business_overview" not in columns:
+            with _engine.begin() as connection:
+                connection.execute(text("ALTER TABLE ipo_items ADD COLUMN business_overview TEXT"))
+            logger.info("Database migrated: ipo_items.business_overview added")
     logger.info(f"Database initialized: {database_url}")
 
 

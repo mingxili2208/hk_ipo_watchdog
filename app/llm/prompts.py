@@ -50,11 +50,19 @@ IPO 数据：
 
 def build_daily_digest_prompt(events: list[dict]) -> list[dict]:
     """构造每日汇总 prompt。"""
-    digest_system = SYSTEM_PROMPT + "\n\n你现在是生成每日港股打新汇总。"
+    digest_system = SYSTEM_PROMPT + """
 
-    user_content = f"""请根据今日事件生成每日港股打新汇总：
+你现在是生成每日港股打新汇总。
+事件中的 ipo、allotment、grey_market 和 strategy_score 字段是日报生成时的当前结构化快照。
+对于已提供的字段，必须在要点中准确覆盖招股日期、上市日期、发售价、每手股数、入场费、行业及 business_overview（主营业务官方章程摘要）等关键信息，不得称其缺失。
+可将 business_overview 简明翻译或归纳为中文主营业务，但不得添加原文没有的业务或判断。
+strategy_score 中的 score、level、score_breakdown、trigger_reasons 与 risk_flags 是系统规则引擎输出，应准确复述评分及其依据，不得自行改写分数。
+new_ipo 表示系统发现仍处于跟踪阶段的新股，不要擅自表述为递交 IPO 申请。
+ipo_follow_up 表示此前已发现且尚待上市的跟踪提醒，必须提及 days_to_listing 和 detail_digest_date（如提供）。"""
 
-今日事件：
+    user_content = f"""请根据今日事件及持续跟踪项目生成每日港股打新汇总：
+
+日报项目：
 {json.dumps(events, ensure_ascii=False, indent=2)}
 
 请生成 JSON 格式的每日汇总。"""

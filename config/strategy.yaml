@@ -28,6 +28,7 @@ sponsor:
 grey_market:
   min_grey_gain_percent: 5
   alert_if_below_percent: -3
+  re_alert_step_percent: 5
 
 scoring:
   basic_weight: 30

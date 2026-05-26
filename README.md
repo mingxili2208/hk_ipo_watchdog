@@ -4,8 +4,8 @@
 
 ## 功能
 
-- 从 HKEXnews 官方新上市信息页发现 IPO，并解析官方招股公告 / 配发结果 PDF
-- 通过 AAStocks 补充 IPO 字段并采集暗盘数据
+- 从 HKEXnews 官方新上市信息页发现 IPO，并解析官方招股公告、招股章程摘要及配发结果 PDF
+- 通过 AAStocks 补充 IPO 字段；暗盘实时行情适配暂时关闭
 - 根据用户配置的策略自动筛选和打分
 - 可调用 OpenAI 兼容 LLM 生成中文摘要（例如 OpenAI / DeepSeek）
 - 通过 Telegram / Email / Bark / Server 酱推送
@@ -92,9 +92,10 @@ SERVER_CHAN_SEND_KEY=
 | 用途 | 来源 | 说明 |
 |---|---|---|
 | 新 IPO 发现及基础字段 | HKEXnews New Listing Information - Main Board | 官方主源；解析 `NEW LISTING ANNOUNCEMENTS` PDF，仅当前招股中的 IPO 生成 `new_ipo` 事件 |
+| 公司主营业务摘要 | HKEXnews `PROSPECTUSES` PDF | 官方主源；仅当该 IPO 尚无摘要时读取一次 `OVERVIEW` 首句短概览并入库 |
 | 配发结果 | HKEXnews New Listing Information - Main Board | 官方主源；解析 `ALLOTMENT RESULTS` PDF，仅处理已跟踪 IPO |
 | IPO 信息补充 | AAStocks IPO 首页 | 补充行业等字段，不覆盖官方字段 |
-| 暗盘行情 | AAStocks 暗盘页 | `config/sources.yaml` 默认关闭，按需要启用 |
+| 暗盘行情 | AAStocks 暗盘页 | 当前关闭；页面实时价格由动态通道填充，静态 HTML 解析不可用 |
 
 官方来源地址：
 
@@ -159,7 +160,7 @@ ZHIPU_API_KEY=your_zhipu_api_key
 
 ## 推送配置
 
-系统在策略评分达到推送阈值，或产生符合规则的配发/暗盘事件时发送提醒；每日汇总按 `config/schedule.yaml` 的时间发送。默认策略低于 `only_push_score_above: 60` 不会发送实时提醒。
+系统在策略评分达到推送阈值，或产生符合规则的配发/暗盘事件时发送提醒；每日汇总按 `config/schedule.yaml` 的时间发送。默认策略低于 `only_push_score_above: 60` 不会发送普通实时提醒；暗盘跌破风险线时会提升为重点提醒。
 
 若希望另行启用 Telegram，需先在 `.env` 配置：
 
@@ -366,7 +367,16 @@ python3 -m app.main strategy scan
 
 # 立即生成并发送当日日报
 python3 -m app.main digest daily
+
+# 当日日报已经发送后，显式补发一次更新后的日报
+python3 -m app.main digest daily --resend
 ```
+
+日报会按香港自然日汇总事件，并附带数据库中对应 IPO 的当前结构化字段，包括招股起止日、上市日、发售价、每手股数、入场费、已有行业信息及主营业务短摘要。主营业务取自 HKEX 官方招股章程 `OVERVIEW` 首句（最长 320 字符），并在邮件中标注为“官方章程摘要”，不展开为长篇章程内容。发送日报前，系统会基于最新入库字段重新计算各股票的策略评分，在邮件中列出总分、提醒等级、推送阈值以及基础信息、认购热度、配发结构、暗盘表现等分项依据。
+
+对于此前日报已发现、已有有效上市日期且仍未上市的 IPO，后续日报还会加入“持续跟踪”段，显示距离上市日还剩多少天、主营业务短摘要，并提示详细招股信息所在的首次发现日报日期。缺少上市日期或已上市/归档的条目不会进入倒计时跟踪。数据源尚未解析出的字段会保持缺失，不由 LLM 猜测补写。
+
+正常日报使用日期级去重键，同一香港日期只自动发送一次。`--resend` 用于已经成功发送后确需补充内容的场景：它会在标题标注 `[补发]` 并保存独立的补发投递记录，不删除或覆盖原始日报记录；重复执行会再次发送，请仅在需要时运行。
 
 ## 自动运行
 
@@ -376,9 +386,9 @@ python3 -m app.main digest daily
 
 | 任务 | 默认频率 | 说明 |
 |---|---:|---|
-| IPO 日历 | 每 10 分钟 | 读取 HKEX 官方招股公告并用 AAStocks 补字段 |
+| IPO 日历 | 每 10 分钟 | 读取 HKEX 官方招股公告、首次补充缺失的官方章程业务摘要，并用 AAStocks 补字段 |
 | HKEX 公告 / 配发结果 | 每 5 分钟 | 同一个任务读取官方配发 PDF；无需另起配发轮询 |
-| 暗盘 | 默认关闭 | 启用后默认每 1 分钟采集 |
+| AAStocks 暗盘 | 当前关闭 | 待动态行情读取适配完成后再启用 |
 | 日报 | 每天 `21:30` | 时区为 `Asia/Hong_Kong` |
 
 ### 前台运行
@@ -388,6 +398,29 @@ python3 -m app.main run
 ```
 
 该命令会在当前终端前台持续运行 APScheduler；关闭终端会停止监控。长期使用推荐 Docker Compose，或自行将同一命令托管为系统服务。
+
+### 暗盘监控状态
+
+暗盘自动采集当前在 `config/sources.yaml` 与 `config/schedule.yaml` 中关闭。2026-05-26 的真实运行核查发现，AAStocks 暗盘页 HTML 仅提供股票代码及行情占位节点，实时价格由页面脚本通过动态行情通道更新；当前静态解析器会返回 `0 quotes`，不能作为有效暗盘行情使用。
+
+后续应在独立分支完成动态行情读取、真实页面回归验证和授权/稳定性评估后再重新启用。已有的窗口限制与提醒降噪逻辑将作为重新接入时的保护措施：按香港时间工作日 `16:15-18:30`、每 5 分钟运行，完整交易窗口最多约请求 28 次。
+
+暗盘提醒规则位于 `config/strategy.yaml`：
+
+```yaml
+grey_market:
+  min_grey_gain_percent: 5
+  alert_if_below_percent: -3
+  re_alert_step_percent: 5
+```
+
+- 第一次达到 `+5%` 或 `-3%` 阈值时可触发对应提醒。
+- 同一股票在同一交易日持续落在同一个涨跌幅阶梯内，不会反复发送相同 Email 或重复调用 LLM。
+- 相较上一次提醒继续向同一方向变化至少 `5` 个百分点，才进入新阶梯并允许再次提醒。
+- 自动任务在没有已跟踪活跃 IPO 时也会直接跳过请求。
+- 当前不应使用 `python3 -m app.main collect grey-market --once` 判断真实暗盘表现；命令仅可用于后续适配开发时的页面诊断。
+
+暗盘行情来自第三方公开页面且仅供参考，页面内容、可访问性及数据授权条件可能变化；邮件提醒不构成交易建议，也不应被用于对外再发布行情数据。
 
 ### Docker 自动运行（推荐）
 
@@ -492,6 +525,7 @@ docker compose exec -T hk-ipo-watchdog python -m app.main test-notification
 - LLM 已设置为 GLM-5.1；必须通过本地 `.env` 提供 `ZHIPU_API_KEY` 才能生成真实 AI 摘要。
 - Telegram 当前关闭；仅在提供 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_CHAT_ID` 后再启用。
 - Email 当前启用；必须同时提供 SMTP 凭据和至少一个 `config/recipients.yaml` 收件地址。
+- AAStocks 暗盘当前关闭；经验证现有静态 HTML 解析无法获得动态实时报价，待独立分支适配后再启用。
 - 正式库如仍保留早期错误数据源产生的记录，应在长期运行前备份并清理。
 
 ## 命令一览
@@ -502,9 +536,10 @@ python3 -m app.main run              # 启动常驻调度服务
 python3 -m app.main run --dry-run    # 只运行不推送
 python3 -m app.main collect ipo-calendar --once   # 采集 IPO 日历
 python3 -m app.main collect announcements --once   # 采集公告
-python3 -m app.main collect grey-market --once     # 采集暗盘
+python3 -m app.main collect grey-market --once     # 暗盘适配诊断（当前不提供可靠报价）
 python3 -m app.main strategy scan    # 策略扫描
-python3 -m app.main digest daily     # 发送日报
+python3 -m app.main digest daily     # 发送当日日报（当天成功发送后自动去重）
+python3 -m app.main digest daily --resend  # 显式补发当日更新版日报
 python3 -m app.main test-llm          # 测试 LLM，不发送推送
 python3 -m app.main test-notification # 测试推送
 python3 -m app.main test-e2e          # 拉取真实数据并发送端到端测试邮件
@@ -561,6 +596,26 @@ app/
 ```bash
 pytest
 ```
+
+## 本地数据回看
+
+Docker Compose 将 `./data` 和 `./logs` 挂载到容器内，因此常驻服务采集的结构化数据与日志可直接在宿主机查看：
+
+```bash
+tail -f logs/app.log
+python3 - <<'PY'
+import sqlite3
+db = sqlite3.connect("data/hk_ipo_watchdog.db")
+for row in db.execute(
+    "SELECT stock_code, stock_name, status, business_overview, updated_at "
+    "FROM ipo_items ORDER BY updated_at DESC LIMIT 20"
+):
+    print(row)
+PY
+python3 -m app.main usage llm
+```
+
+当前实现会将 IPO、事件、评分、摘要、token 用量与通知状态保存至 `data/hk_ipo_watchdog.db`，并将运行诊断记录到 `logs/app.log`。虽然来源配置包含 `save_raw` 字段，但采集器尚未实现原始 HTML/PDF 响应落盘；`data/raw/` 目前不是可回放数据档案。
 
 ## 数据备份
 

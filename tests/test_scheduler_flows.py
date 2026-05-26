@@ -1,7 +1,7 @@
 """调度任务、存储和通知闭环回归测试。"""
 
 from datetime import date, datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.llm.client import LLMService
 from app.llm.providers.mock_provider import MockLLMProvider
@@ -195,6 +195,108 @@ def test_daily_digest_is_sent_only_once_per_day():
     assert notifier.calls == 1
 
 
+def test_daily_digest_can_be_resend_without_replacing_original_record():
+    app, repo = _make_app()
+    notifier = FakeNotifier("email")
+    app._notifiers = [("email", notifier, 1)]
+
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
+        with patch(
+            "app.utils.time_utils.now_hk",
+            return_value=datetime(2026, 5, 26, 22, 30, tzinfo=timezone.utc),
+        ):
+            app.job_send_daily_digest()
+            app.job_send_daily_digest(resend=True)
+
+    rows = repo.session.query(NotificationORM).order_by(NotificationORM.id).all()
+    assert notifier.calls == 2
+    assert rows[0].notification_key == "digest:daily_digest:2026-05-26"
+    assert rows[1].notification_key.startswith("digest:daily_digest:2026-05-26:resend:")
+    assert rows[1].title.startswith("[补发]")
+    assert "更新补发版本" in rows[1].body
+
+
+def test_daily_digest_events_include_stored_ipo_snapshot():
+    app, repo = _make_app()
+    ipo = _ipo().model_copy(
+        update={
+            "subscription_start_date": date(2026, 5, 26),
+            "subscription_close_date": date(2026, 5, 29),
+            "listing_date": date(2026, 6, 3),
+            "offer_price_min": 17.1,
+            "offer_price_max": 17.1,
+            "entry_fee_hkd": 3454.49,
+        }
+    )
+    repo.upsert_ipo(ipo)
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
+        repo.add_event(
+            stock_code=ipo.stock_code,
+            event_type="new_ipo",
+            title="发现新 IPO",
+        )
+        events = repo.get_today_events()
+
+    assert events[0]["ipo"]["subscription_close_date"] == "2026-05-29"
+    assert events[0]["ipo"]["offer_price_min"] == 17.1
+    assert events[0]["ipo"]["entry_fee_hkd"] == 3454.49
+
+
+def test_daily_digest_attaches_current_strategy_score_without_alert_send():
+    app, repo = _make_app()
+    repo.upsert_ipo(_ipo())
+    notifier = FakeNotifier("email")
+    app._notifiers = [("email", notifier, 1)]
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
+        repo.add_event(stock_code="02616", event_type="new_ipo", title="发现新 IPO")
+        events = app._attach_digest_scores(repo.get_today_events())
+
+    score = events[0]["strategy_score"]
+    assert score["score"] > 0
+    assert score["push_score_threshold"] == 60
+    assert any("基础信息" in item for item in score["score_breakdown"])
+    assert notifier.calls == 0
+
+
+def test_follow_up_on_next_day_counts_down_and_references_discovery_digest():
+    app, repo = _make_app()
+    ipo = _ipo().model_copy(update={"listing_date": date(2026, 6, 3)})
+    repo.upsert_ipo(ipo)
+    repo.add_event(stock_code="02616", event_type="new_ipo", title="发现新 IPO")
+    event = repo.session.query(IPOEventORM).one()
+    event.created_at = datetime(2026, 5, 26, 8, tzinfo=timezone.utc)
+    repo.session.commit()
+    repo.record_notification(
+        notification_key="digest:daily_digest:2026-05-26",
+        stock_code=None,
+        notification_type="daily_digest",
+        level=2,
+        channel="email",
+        title="日报",
+        body="body",
+        status="sent",
+    )
+
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 27)):
+        follow_ups = repo.get_ipo_follow_ups_for_digest()
+
+    assert follow_ups[0]["stock_code"] == "02616"
+    assert follow_ups[0]["days_to_listing"] == 7
+    assert follow_ups[0]["detail_digest_date"] == "2026-05-26"
+
+
+def test_follow_up_excludes_item_without_listing_date():
+    app, repo = _make_app()
+    repo.upsert_ipo(_ipo())
+    repo.add_event(stock_code="02616", event_type="new_ipo", title="发现新 IPO")
+    event = repo.session.query(IPOEventORM).one()
+    event.created_at = datetime(2026, 5, 26, 8, tzinfo=timezone.utc)
+    repo.session.commit()
+
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 27)):
+        assert repo.get_ipo_follow_ups_for_digest() == []
+
+
 def test_llm_service_records_vendor_token_usage():
     init_db("sqlite:///:memory:")
     repo = Repository()
@@ -275,6 +377,28 @@ def test_same_scan_source_enrichment_only_records_new_ipo_event():
     assert [(event.stock_code, event.event_type) for event in events] == [("02616", "new_ipo")]
 
 
+def test_calendar_fetches_official_business_overview_only_until_stored():
+    app, repo = _make_app()
+    official = _ipo().model_copy(
+        update={
+            "raw_sources": {
+                "hkex_new_listing": {"prospectus_url": "https://example.test/prospectus.pdf"}
+            }
+        }
+    )
+    app._collect_all_ipo_sources = lambda: [official]
+
+    with patch(
+        "app.collectors.hkex_new_listing.HKEXNewListingCollector.fetch_business_overview",
+        return_value="We provide consumer 3D printing products and services.",
+    ) as fetch:
+        app.job_collect_ipo_calendar()
+        app.job_collect_ipo_calendar()
+
+    assert repo.get_ipo_by_code("02616").business_overview.startswith("We provide")
+    assert fetch.call_count == 1
+
+
 def test_closed_ipo_is_seeded_for_allotment_without_new_ipo_event():
     app, repo = _make_app()
     app._collect_all_ipo_sources = lambda: [
@@ -300,10 +424,80 @@ def test_downside_grey_quote_generates_risk_notification():
     )
     app._collect_grey_market = lambda codes: [quote]
 
-    app.job_collect_grey_market()
+    app.job_collect_grey_market(ignore_window=True)
 
     assert notifier.calls == 1
-    assert repo.has_notification_been_sent("02616:grey_market_breakout:grey_broker_202605251615")
+    assert repo.has_notification_been_sent("02616:grey_market_breakout:grey_broker_2026-05-25_down_0")
+
+
+def test_grey_market_same_tier_notifies_once_but_material_move_notifies_again():
+    app, repo = _make_app()
+    repo.upsert_ipo(_ipo())
+    notifier = FakeNotifier("telegram")
+    app._notifiers = [("telegram", notifier, 1)]
+    quotes = iter(
+        [
+            GreyMarketQuote(
+                stock_code="02616",
+                source="aastocks",
+                change_percent=-4.0,
+                quoted_at=datetime(2026, 5, 25, 16, 15),
+            ),
+            GreyMarketQuote(
+                stock_code="02616",
+                source="aastocks",
+                change_percent=-4.5,
+                quoted_at=datetime(2026, 5, 25, 16, 20),
+            ),
+            GreyMarketQuote(
+                stock_code="02616",
+                source="aastocks",
+                change_percent=-8.1,
+                quoted_at=datetime(2026, 5, 25, 16, 25),
+            ),
+        ]
+    )
+    app._collect_grey_market = lambda codes: [next(quotes)]
+
+    for _ in range(3):
+        app.job_collect_grey_market(ignore_window=True)
+
+    assert notifier.calls == 2
+    assert repo.has_notification_been_sent("02616:grey_market_breakout:grey_aastocks_2026-05-25_down_0")
+    assert repo.has_notification_been_sent("02616:grey_market_breakout:grey_aastocks_2026-05-25_down_1")
+
+
+def test_scheduled_grey_market_collection_skips_outside_market_window():
+    settings = Settings(
+        schedule={
+            "grey_market": {
+                "enabled": True,
+                "interval_minutes": 5,
+                "window_start": "16:15",
+                "window_end": "18:30",
+                "weekdays_only": True,
+            }
+        }
+    )
+    app, _ = _make_app(settings)
+    app._collect_grey_market = MagicMock(return_value=[])
+
+    with patch(
+        "app.utils.time_utils.now_hk",
+        return_value=datetime(2026, 5, 25, 15, 0, tzinfo=timezone.utc),
+    ):
+        app.job_collect_grey_market()
+
+    app._collect_grey_market.assert_not_called()
+
+
+def test_grey_market_collection_skips_request_without_active_ipos():
+    app, _ = _make_app()
+    app._collect_grey_market = MagicMock(return_value=[])
+
+    app.job_collect_grey_market(ignore_window=True)
+
+    app._collect_grey_market.assert_not_called()
 
 
 def test_official_source_fields_are_not_overwritten_but_missing_fields_are_filled():

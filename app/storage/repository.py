@@ -63,6 +63,7 @@ class Repository:
             "stock_name_en": ipo.stock_name_en,
             "market": ipo.market,
             "industry": ipo.industry,
+            "business_overview": ipo.business_overview,
             "status": ipo.status,
             "subscription_start_date": str(ipo.subscription_start_date) if ipo.subscription_start_date else None,
             "subscription_close_date": str(ipo.subscription_close_date) if ipo.subscription_close_date else None,
@@ -465,28 +466,103 @@ class Repository:
         )
 
     def get_today_events(self) -> list[dict]:
-        """获取今日事件。"""
+        """获取香港自然日内的事件，并附带可用于日报的当前数据快照。"""
         from app.utils.time_utils import today_hk
 
         today = today_hk()
-        today_str = str(today)
+        hk_tz = timezone(timedelta(hours=8))
+        start = datetime.combine(today, time.min, tzinfo=hk_tz).astimezone(timezone.utc)
+        end = start + timedelta(days=1)
         rows = (
             self.session.query(IPOEventORM)
-            .filter(IPOEventORM.created_at >= today_str)
+            .filter(IPOEventORM.created_at >= start, IPOEventORM.created_at < end)
             .all()
         )
         result = []
         for r in rows:
             detail = json.loads(r.detail_json) if r.detail_json else {}
-            result.append({
+            event = {
                 "id": r.id,
                 "stock_code": r.stock_code,
                 "event_type": r.event_type,
                 "title": r.title,
                 "detail": detail,
                 "created_at": str(r.created_at),
-            })
+            }
+            if r.stock_code:
+                ipo = self.get_ipo_by_code(r.stock_code)
+                if ipo:
+                    event["ipo"] = ipo.model_dump(
+                        mode="json",
+                        exclude={"raw_sources", "source_url", "created_at", "updated_at"},
+                        exclude_none=True,
+                    )
+                if r.event_type == "allotment_result":
+                    allotment = self.get_latest_allotment(r.stock_code)
+                    if allotment:
+                        event["allotment"] = allotment.model_dump(mode="json", exclude_none=True)
+                if r.event_type == "grey_market_breakout":
+                    grey = self.get_latest_grey_quote(r.stock_code)
+                    if grey:
+                        event["grey_market"] = grey.model_dump(mode="json", exclude_none=True)
+            result.append(event)
         return result
+
+    def get_ipo_follow_ups_for_digest(self) -> list[dict]:
+        """获取此前发现、尚待上市且适合在日报继续提醒的 IPO。"""
+        from app.utils.time_utils import today_hk
+
+        today = today_hk()
+        hk_tz = timezone(timedelta(hours=8))
+        rows = (
+            self.session.query(IPOEventORM)
+            .filter(IPOEventORM.event_type == "new_ipo", IPOEventORM.stock_code.isnot(None))
+            .order_by(IPOEventORM.created_at.asc())
+            .all()
+        )
+        follow_ups = []
+        included_codes: set[str] = set()
+        for row in rows:
+            if not row.stock_code or row.stock_code in included_codes:
+                continue
+            created_at = row.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            discovered_on = created_at.astimezone(hk_tz).date()
+            if discovered_on >= today:
+                continue
+
+            ipo = self.get_ipo_by_code(row.stock_code)
+            if (
+                not ipo
+                or not ipo.listing_date
+                or ipo.listing_date < today
+                or ipo.status in ("listed", "archived")
+            ):
+                continue
+
+            detail_digest_key = f"digest:daily_digest:{discovered_on}"
+            follow_ups.append(
+                {
+                    "stock_code": ipo.stock_code,
+                    "event_type": "ipo_follow_up",
+                    "title": f"持续跟踪: {ipo.stock_code} {ipo.stock_name or ''}",
+                    "ipo": ipo.model_dump(
+                        mode="json",
+                        exclude={"raw_sources", "source_url", "created_at", "updated_at"},
+                        exclude_none=True,
+                    ),
+                    "discovered_on": str(discovered_on),
+                    "detail_digest_date": (
+                        str(discovered_on)
+                        if self.has_notification_been_sent(detail_digest_key)
+                        else None
+                    ),
+                    "days_to_listing": (ipo.listing_date - today).days,
+                }
+            )
+            included_codes.add(ipo.stock_code)
+        return follow_ups
 
 
 def _ipo_to_orm(ipo: IPOItem) -> IPOItemORM:
@@ -497,6 +573,7 @@ def _ipo_to_orm(ipo: IPOItem) -> IPOItemORM:
         stock_name_en=ipo.stock_name_en,
         market=ipo.market,
         industry=ipo.industry,
+        business_overview=ipo.business_overview,
         status=ipo.status,
         subscription_start_date=str(ipo.subscription_start_date) if ipo.subscription_start_date else None,
         subscription_close_date=str(ipo.subscription_close_date) if ipo.subscription_close_date else None,
@@ -523,6 +600,7 @@ def _orm_to_ipo(orm: IPOItemORM) -> IPOItem:
         stock_name_en=orm.stock_name_en,
         market=orm.market,
         industry=orm.industry,
+        business_overview=orm.business_overview,
         status=orm.status or "unknown",
         subscription_start_date=_str_to_date(orm.subscription_start_date),
         subscription_close_date=_str_to_date(orm.subscription_close_date),
