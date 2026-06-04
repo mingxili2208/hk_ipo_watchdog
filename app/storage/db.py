@@ -26,11 +26,27 @@ def init_db(database_url: str = "sqlite:///data/hk_ipo_watchdog.db") -> None:
 
     Base.metadata.create_all(_engine)
     if database_url.startswith("sqlite"):
-        columns = {column["name"] for column in inspect(_engine).get_columns("ipo_items")}
+        inspector = inspect(_engine)
+        columns = {column["name"] for column in inspector.get_columns("ipo_items")}
         if "business_overview" not in columns:
             with _engine.begin() as connection:
                 connection.execute(text("ALTER TABLE ipo_items ADD COLUMN business_overview TEXT"))
             logger.info("Database migrated: ipo_items.business_overview added")
+        llm_columns = {
+            column["name"] for column in inspector.get_columns("llm_evaluations")
+        }
+        for column_name in (
+            "business_quality_reason",
+            "financial_health_reason",
+            "valuation_fairness_reason",
+            "growth_prospect_reason",
+        ):
+            if column_name not in llm_columns:
+                with _engine.begin() as connection:
+                    connection.execute(
+                        text(f"ALTER TABLE llm_evaluations ADD COLUMN {column_name} TEXT")
+                    )
+                logger.info(f"Database migrated: llm_evaluations.{column_name} added")
     logger.info(f"Database initialized: {database_url}")
 
 

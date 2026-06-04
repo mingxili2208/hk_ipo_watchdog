@@ -37,6 +37,9 @@ scoring:
   grey_market_weight: 20
   sponsor_weight: 10
   risk_penalty_max: 30
+  # LLM 评估在综合评分中的权重（0-1）。
+  # 0.6 表示 LLM 评分占 60%，规则评分占 40%。
+  llm_weight: 0.6
 
 alerts:
   watch_score_above: 60

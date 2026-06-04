@@ -1,15 +1,41 @@
 """通知内容格式化。"""
 
-from app.models import IPOItem, StrategyDecision, LLMSummary
+from app.models import IPOItem, StrategyDecision, LLMSummary, LLMEvaluation
 
 
 _LEVEL_NAMES = {1: "普通记录", 2: "观察提醒", 3: "重点提醒", 4: "紧急提醒"}
+
+_RISK_LEVEL_NAMES = {
+    "low": "低风险",
+    "medium": "中等风险",
+    "high": "高风险",
+    "very_high": "极高风险",
+}
+
+_ACTION_NAMES = {
+    "subscribe": "建议申购",
+    "skip": "建议放弃",
+    "watch": "建议观望",
+}
+
+_STATUS_NAMES = {
+    "unknown": "未知",
+    "planned": "计划中",
+    "hearing_passed": "聆讯通过",
+    "subscription_open": "招股中",
+    "subscription_closed": "已截止认购",
+    "allotment_result_published": "配发结果已公布",
+    "grey_market_trading": "暗盘交易中",
+    "listed": "已上市",
+    "archived": "已归档",
+}
 
 
 def format_notification(
     summary: LLMSummary,
     decision: StrategyDecision,
     ipo: IPOItem | None = None,
+    llm_eval: LLMEvaluation | None = None,
 ) -> tuple[str, str]:
     """格式化推送内容，返回 (title, body)。"""
     title = summary.title
@@ -51,6 +77,34 @@ def format_notification(
     lines.append(f"综合评分: {decision.score} / 100")
     lines.append(f"提醒等级: {_LEVEL_NAMES.get(decision.level, '未知')}")
 
+    # ── LLM 评估依据 ──
+    if llm_eval:
+        lines.append("")
+        lines.append("AI 评估依据:")
+        dims = [
+            ("商业模式", llm_eval.business_quality, llm_eval.business_quality_reason),
+            ("财务健康", llm_eval.financial_health, llm_eval.financial_health_reason),
+            ("定价合理", llm_eval.valuation_fairness, llm_eval.valuation_fairness_reason),
+            ("增长前景", llm_eval.growth_prospect, llm_eval.growth_prospect_reason),
+        ]
+        for name, score, reason in dims:
+            lines.append(f"  {name}: {score}/10 — {_reason_text(reason)}")
+        lines.append(
+            f"  风险等级: {_RISK_LEVEL_NAMES.get(llm_eval.risk_level, llm_eval.risk_level)}"
+        )
+        if llm_eval.recommended_action:
+            action_name = _ACTION_NAMES.get(
+                llm_eval.recommended_action, llm_eval.recommended_action
+            )
+            lines.append(f"  AI 建议: {action_name}")
+        if llm_eval.reasoning:
+            lines.append(f"  综合判断: {llm_eval.reasoning}")
+        if llm_eval.comparable_companies:
+            lines.append(f"  可比公司: {'、'.join(llm_eval.comparable_companies)}")
+        if llm_eval.risk_factors:
+            lines.append(f"  风险因素: {'；'.join(llm_eval.risk_factors)}")
+        lines.append(f"  (评估来源: {llm_eval.evaluation_source}，置信度: {llm_eval.confidence})")
+
     lines.append("")
     lines.append(summary.summary)
 
@@ -90,11 +144,18 @@ def format_daily_digest(
     summary: LLMSummary,
     events: list[dict],
     follow_ups: list[dict] | None = None,
+    active_evaluations: list[dict] | None = None,
+    pending_evaluations: list[dict] | None = None,
+    version_update: dict | None = None,
 ) -> tuple[str, str]:
     """格式化每日汇总。"""
     title = summary.title
 
     lines = [summary.summary, ""]
+
+    if version_update and version_update.get("enabled"):
+        lines.extend(_format_version_update(version_update))
+        lines.append("")
 
     if events:
         lines.append(f"今日事件 ({len(events)} 条):")
@@ -155,21 +216,37 @@ def format_daily_digest(
                 score_value = score.get("score")
                 level_value = score.get("level")
                 level_name = _LEVEL_NAMES.get(level_value, "未知")
-                score_line = f"评分: {score_value}/100 | 等级: {level_name}"
-                push_threshold = score.get("push_score_threshold")
-                if (
-                    score_value is not None
-                    and push_threshold is not None
-                    and score_value < push_threshold
-                ):
-                    score_line += f" | 未达到普通推送线 {push_threshold}"
+                score_line = f"AI 评委分: {score_value}/100 | 等级: {level_name}"
                 lines.append(f"      {score_line}")
                 if score.get("score_breakdown"):
-                    lines.append("      评分依据:")
+                    lines.append("      AI 评分依据:")
                     for reason in score["score_breakdown"]:
                         lines.append(f"        - {reason}")
-                if score.get("risk_flags"):
-                    lines.append(f"      风险标记: {'；'.join(score['risk_flags'])}")
+
+            # ── LLM 评估依据 ──
+            llm_eval = ev.get("llm_evaluation") or {}
+            if llm_eval and llm_eval.get("evaluation_source") != "fallback":
+                lines.append("      AI 评估依据:")
+                dims = [
+                    ("商业模式", llm_eval.get("business_quality"), llm_eval.get("business_quality_reason")),
+                    ("财务健康", llm_eval.get("financial_health"), llm_eval.get("financial_health_reason")),
+                    ("定价合理", llm_eval.get("valuation_fairness"), llm_eval.get("valuation_fairness_reason")),
+                    ("增长前景", llm_eval.get("growth_prospect"), llm_eval.get("growth_prospect_reason")),
+                ]
+                for name, sc, reason in dims:
+                    if sc is not None:
+                        lines.append(f"        {name}: {sc}/10 — {_reason_text(reason)}")
+                if llm_eval.get("risk_level"):
+                    lines.append(f"        风险等级: {_RISK_LEVEL_NAMES.get(llm_eval['risk_level'], llm_eval['risk_level'])}")
+                if llm_eval.get("recommended_action"):
+                    action = _ACTION_NAMES.get(llm_eval["recommended_action"], llm_eval["recommended_action"])
+                    lines.append(f"        AI 建议: {action}")
+                if llm_eval.get("reasoning"):
+                    lines.append(f"        综合判断: {llm_eval['reasoning']}")
+                if llm_eval.get("comparable_companies"):
+                    lines.append(f"        可比公司: {'、'.join(llm_eval['comparable_companies'])}")
+                if llm_eval.get("risk_factors"):
+                    lines.append(f"        风险因素: {'；'.join(llm_eval['risk_factors'])}")
 
     if follow_ups:
         lines.append("")
@@ -185,12 +262,97 @@ def format_daily_digest(
             else:
                 countdown = f"距离上市还有 {days} 天"
             lines.append(f"  - {code} {name}: {countdown} (上市日: {listing_date})")
-            if ipo.get("business_overview"):
-                lines.append(f"      主营业务 (官方章程摘要): {ipo['business_overview']}")
+            if item.get("ai_score") is not None:
+                lines.append(f"      AI 评委分: {item['ai_score']}/100")
+            overview = item.get("company_overview") or ipo.get("business_overview")
+            if overview:
+                lines.append(f"      公司概述: {overview}")
+            llm_eval = item.get("llm_evaluation") or {}
+            if llm_eval.get("recommended_action"):
+                action = _ACTION_NAMES.get(llm_eval["recommended_action"], llm_eval["recommended_action"])
+                lines.append(f"      AI 建议: {action}")
             if item.get("detail_digest_date"):
                 lines.append(f"      详细招股信息见 {item['detail_digest_date']} 日报")
             else:
                 lines.append(f"      首次发现于 {item.get('discovered_on', '-')}，未确认存在已送达的详情日报")
+
+    if active_evaluations:
+        lines.append("")
+        lines.append(f"AI 关注 Top {len(active_evaluations)}:")
+        for item in active_evaluations:
+            ipo = item.get("ipo") or {}
+            code = item.get("stock_code", "")
+            name = ipo.get("stock_name", "")
+            rank = item.get("rank", "-")
+            score = item.get("ai_score")
+            status = _STATUS_NAMES.get(ipo.get("status"), ipo.get("status", "-"))
+            listing_date = ipo.get("listing_date", "-")
+            score_text = f"{score}/100" if score is not None else "暂无"
+            lines.append(f"  {rank}. {code} {name} | AI 评委分: {score_text}")
+            lines.append(f"      状态: {status} | 上市日: {listing_date}")
+            if ipo.get("industry"):
+                lines.append(f"      行业: {ipo['industry']}")
+            overview = item.get("company_overview")
+            if overview:
+                lines.append(f"      公司概述: {overview}")
+            if ipo.get("subscription_close_date"):
+                lines.append(f"      截止认购: {ipo['subscription_close_date']}")
+            if ipo.get("entry_fee_hkd") is not None:
+                lines.append(f"      入场费: HKD {ipo['entry_fee_hkd']:,.2f}")
+
+            llm_eval = item.get("llm_evaluation") or {}
+            if llm_eval:
+                if llm_eval.get("recommended_action"):
+                    action = _ACTION_NAMES.get(llm_eval["recommended_action"], llm_eval["recommended_action"])
+                    lines.append(f"      AI 建议: {action}")
+                lines.append("      入榜理由:")
+                dims = [
+                    ("商业模式", llm_eval.get("business_quality"), llm_eval.get("business_quality_reason")),
+                    ("财务健康", llm_eval.get("financial_health"), llm_eval.get("financial_health_reason")),
+                    ("定价合理", llm_eval.get("valuation_fairness"), llm_eval.get("valuation_fairness_reason")),
+                    ("增长前景", llm_eval.get("growth_prospect"), llm_eval.get("growth_prospect_reason")),
+                ]
+                for name, sc, reason in dims:
+                    if sc is not None:
+                        lines.append(f"        {name}: {sc}/10 — {_reason_text(reason)}")
+                if llm_eval.get("risk_level"):
+                    lines.append(f"        风险等级: {_RISK_LEVEL_NAMES.get(llm_eval['risk_level'], llm_eval['risk_level'])}")
+                if llm_eval.get("reasoning"):
+                    lines.append(f"        综合判断: {llm_eval['reasoning']}")
+                if llm_eval.get("risk_factors"):
+                    lines.append(f"        风险因素: {'；'.join(llm_eval['risk_factors'])}")
+
+    if pending_evaluations:
+        lines.append("")
+        lines.append(f"AI 评审待补充 / 未入榜 ({len(pending_evaluations)} 只):")
+        for item in pending_evaluations:
+            ipo = item.get("ipo") or {}
+            code = item.get("stock_code", "")
+            name = ipo.get("stock_name", "")
+            status = _STATUS_NAMES.get(ipo.get("status"), ipo.get("status", "-"))
+            listing_date = ipo.get("listing_date", "-")
+            lines.append(f"  - {code} {name}: 状态 {status} | 上市日: {listing_date}")
+            overview = item.get("company_overview")
+            if overview:
+                lines.append(f"      已知概述: {overview}")
+            known = []
+            if ipo.get("industry"):
+                known.append(f"行业: {ipo['industry']}")
+            if ipo.get("subscription_close_date"):
+                known.append(f"截止认购: {ipo['subscription_close_date']}")
+            if ipo.get("entry_fee_hkd") is not None:
+                known.append(f"入场费: HKD {ipo['entry_fee_hkd']:,.2f}")
+            if known:
+                lines.append(f"      已知信息: {' | '.join(known)}")
+            unknown = item.get("unknown_fields") or []
+            if unknown:
+                lines.append(f"      Unknown: {'、'.join(unknown)}")
+            exclusions = item.get("top_exclusion_reasons") or []
+            if exclusions:
+                lines.append(f"      未入榜原因: {'；'.join(exclusions)}")
+            note = item.get("ai_review_note")
+            if note:
+                lines.append(f"      AI 状态: {note}")
 
     if summary.key_points:
         lines.append("")
@@ -224,3 +386,33 @@ def append_daily_llm_usage(body: str, usage: dict) -> str:
         f"  总 Token: {usage['total_tokens']:,}",
     ]
     return "\n".join(lines)
+
+
+def _format_version_update(update: dict) -> list[str]:
+    title = update.get("title") or "版本更新说明"
+    version = update.get("version")
+    date = update.get("date")
+    header_parts = [title]
+    if version:
+        header_parts.append(str(version))
+    if date:
+        header_parts.append(str(date))
+
+    lines = [" | ".join(header_parts)]
+    highlights = update.get("highlights") or []
+    if highlights:
+        lines.append("本次更新:")
+        for item in highlights:
+            lines.append(f"  - {item}")
+    details = update.get("details") or []
+    if details:
+        lines.append("实现说明:")
+        for item in details:
+            lines.append(f"  - {item}")
+    return lines
+
+
+def _reason_text(reason: str | None) -> str:
+    if reason and str(reason).strip():
+        return str(reason).strip()
+    return "当前缺少可验证的事实依据，需补充招股书或人工复核。"

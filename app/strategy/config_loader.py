@@ -45,6 +45,7 @@ class ScoringConfig(BaseModel):
     grey_market_weight: int = 20
     sponsor_weight: int = 10
     risk_penalty_max: int = 30
+    llm_weight: float = 0.6
 
 
 class AlertsConfig(BaseModel):

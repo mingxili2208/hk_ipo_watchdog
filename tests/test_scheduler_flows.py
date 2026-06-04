@@ -50,6 +50,35 @@ class UsageProvider(MockLLMProvider):
         return response
 
 
+class FixedEvaluationProvider(MockLLMProvider):
+    def __init__(self, score: int):
+        self.score = score
+
+    def generate(self, messages):
+        system_text = next(
+            (msg.get("content", "") for msg in messages if msg.get("role") == "system"),
+            "",
+        )
+        if "IPO 分析师" not in system_text:
+            return super().generate(messages)
+        return {
+            "business_quality": self.score,
+            "business_quality_reason": "公司已有可验证的核心业务收入来源",
+            "financial_health": self.score,
+            "financial_health_reason": "最近一年收入和利润数据支持该评分",
+            "valuation_fairness": self.score,
+            "valuation_fairness_reason": "招股估值与可比公司区间进行比较后得出该评分",
+            "growth_prospect": self.score,
+            "growth_prospect_reason": "目标市场规模和行业增速支持该评分",
+            "risk_level": "low" if self.score >= 8 else "high",
+            "risk_factors": ["测试风险"],
+            "comparable_companies": ["Test Comparable (09998.HK)"],
+            "recommended_action": "subscribe" if self.score >= 8 else "skip",
+            "confidence": "high",
+            "reasoning": "测试用固定评估。",
+        }
+
+
 def _make_app(settings: Settings | None = None) -> tuple[SchedulerApp, Repository]:
     init_db("sqlite:///:memory:")
     repo = Repository()
@@ -230,11 +259,16 @@ def test_daily_digest_events_include_stored_ipo_snapshot():
     )
     repo.upsert_ipo(ipo)
     with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
-        repo.add_event(
+        event_id = repo.add_event(
             stock_code=ipo.stock_code,
             event_type="new_ipo",
             title="发现新 IPO",
         )
+        # ORM 的 created_at 默认用真实时间，手动改为 mock 日期以匹配查询
+        from app.storage.models import IPOEventORM
+        orm_event = repo.session.get(IPOEventORM, event_id)
+        orm_event.created_at = datetime(2026, 5, 26, 10, 0, 0)
+        repo.session.commit()
         events = repo.get_today_events()
 
     assert events[0]["ipo"]["subscription_close_date"] == "2026-05-29"
@@ -242,20 +276,58 @@ def test_daily_digest_events_include_stored_ipo_snapshot():
     assert events[0]["ipo"]["entry_fee_hkd"] == 3454.49
 
 
-def test_daily_digest_attaches_current_strategy_score_without_alert_send():
+def test_daily_digest_excludes_event_without_ai_review():
     app, repo = _make_app()
     repo.upsert_ipo(_ipo())
     notifier = FakeNotifier("email")
     app._notifiers = [("email", notifier, 1)]
+    app._refresh_llm_evaluation_if_needed = lambda ipo: None
     with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
-        repo.add_event(stock_code="02616", event_type="new_ipo", title="发现新 IPO")
+        event_id = repo.add_event(stock_code="02616", event_type="new_ipo", title="发现新 IPO")
+        from app.storage.models import IPOEventORM
+        orm_event = repo.session.get(IPOEventORM, event_id)
+        orm_event.created_at = datetime(2026, 5, 26, 10, 0, 0)
+        repo.session.commit()
+        events = app._attach_digest_scores(repo.get_today_events())
+
+    assert events == []
+    assert notifier.calls == 0
+
+
+def test_daily_digest_uses_ai_judge_score_when_available():
+    from app.models import LLMEvaluation
+    from app.strategy.scoring import calculate_llm_score
+
+    app, repo = _make_app()
+    repo.upsert_ipo(_ipo())
+    evaluation = LLMEvaluation(
+        business_quality=9,
+        business_quality_reason="公司拥有可验证的主营业务优势",
+        financial_health=9,
+        financial_health_reason="最近一年收入和利润表现较强",
+        valuation_fairness=9,
+        valuation_fairness_reason="招股估值低于可比公司中位数",
+        growth_prospect=9,
+        growth_prospect_reason="目标行业仍处于高增长阶段",
+        risk_level="low",
+        risk_factors=[],
+        comparable_companies=[],
+        recommended_action="subscribe",
+        confidence="high",
+        reasoning="测试",
+    )
+    repo.save_llm_evaluation("02616", evaluation, calculate_llm_score(evaluation))
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
+        event_id = repo.add_event(stock_code="02616", event_type="new_ipo", title="发现新 IPO")
+        orm_event = repo.session.get(IPOEventORM, event_id)
+        orm_event.created_at = datetime(2026, 5, 26, 10, 0, 0)
+        repo.session.commit()
         events = app._attach_digest_scores(repo.get_today_events())
 
     score = events[0]["strategy_score"]
-    assert score["score"] > 0
-    assert score["push_score_threshold"] == 60
-    assert any("基础信息" in item for item in score["score_breakdown"])
-    assert notifier.calls == 0
+    assert score["score_source"] == "ai_judge"
+    assert score["score"] >= 90
+    assert score["score_breakdown"][0].startswith("AI 评委分:")
 
 
 def test_follow_up_on_next_day_counts_down_and_references_discovery_digest():
@@ -315,6 +387,255 @@ def test_llm_service_records_vendor_token_usage():
     assert usage.purpose == "ipo_alert"
     assert usage.total_tokens == 60
     assert repo.get_llm_usage_summary()[0]["cached_tokens"] == 5
+
+
+def test_llm_reason_fields_survive_save_and_load():
+    from app.models import LLMEvaluation
+    from app.strategy.scoring import calculate_llm_score
+
+    _, repo = _make_app()
+    evaluation = LLMEvaluation(
+        business_quality=8,
+        business_quality_reason="公司续约率 90%",
+        financial_health=7,
+        financial_health_reason="最近一年收入同比增长 20%",
+        valuation_fairness=6,
+        valuation_fairness_reason="估值低于同行中位数",
+        growth_prospect=9,
+        growth_prospect_reason="行业规模年增速 15%",
+        risk_level="medium",
+        risk_factors=[],
+        comparable_companies=[],
+        recommended_action="watch",
+        confidence="high",
+        reasoning="测试",
+    )
+
+    repo.save_llm_evaluation("02616", evaluation, calculate_llm_score(evaluation))
+    loaded = repo.get_latest_llm_evaluation("02616")
+
+    assert loaded.business_quality_reason == "公司续约率 90%"
+    assert loaded.financial_health_reason == "最近一年收入同比增长 20%"
+
+
+def test_active_ipos_for_digest_returns_ai_top_10_only():
+    from app.models import LLMEvaluation
+
+    _, repo = _make_app()
+    base_eval = LLMEvaluation(
+        business_quality=6,
+        business_quality_reason="公司有明确主营业务",
+        financial_health=6,
+        financial_health_reason="财务数据可供评估",
+        valuation_fairness=6,
+        valuation_fairness_reason="估值有可比参照",
+        growth_prospect=6,
+        growth_prospect_reason="行业仍有增长空间",
+        risk_level="medium",
+        risk_factors=[],
+        comparable_companies=[],
+        recommended_action="watch",
+        confidence="medium",
+        reasoning="测试",
+    )
+    for idx in range(12):
+        code = f"08{idx:03d}"
+        repo.upsert_ipo(
+            _ipo().model_copy(
+                update={
+                    "stock_code": code,
+                    "stock_name": f"IPO {idx}",
+                    "status": "subscription_open",
+                    "business_overview": f"Company {idx} makes test products.",
+                    "subscription_close_date": date(2026, 6, 5),
+                    "listing_date": date(2026, 6, 10),
+                    "entry_fee_hkd": 3030.3,
+                }
+            )
+        )
+        repo.save_llm_evaluation(code, base_eval, 40 + idx)
+    repo.upsert_ipo(
+        _ipo().model_copy(
+            update={
+                "stock_code": "09999",
+                "stock_name": "Noise",
+                "status": "unknown",
+                "business_overview": None,
+                "subscription_close_date": None,
+                "listing_date": None,
+            }
+        )
+    )
+    repo.save_llm_evaluation("09999", base_eval, 99)
+
+    items = repo.get_active_ipos_for_digest()
+
+    assert len(items) == 10
+    assert items[0]["stock_code"] == "08011"
+    assert items[0]["rank"] == 1
+    assert items[0]["ai_score"] == 51
+    assert all(item["stock_code"] != "09999" for item in items)
+    assert "Company 11 makes test products." in items[0]["company_overview"]
+
+
+def test_ai_pending_ipos_for_digest_keeps_failed_or_missing_reviews():
+    from app.models import LLMEvaluation
+
+    _, repo = _make_app()
+    ipo = _ipo().model_copy(
+        update={
+            "stock_code": "01081",
+            "stock_name": "大金重工",
+            "status": "subscription_open",
+            "business_overview": None,
+            "industry": None,
+            "listing_date": None,
+        }
+    )
+    repo.upsert_ipo(ipo)
+    fallback_eval = LLMEvaluation(
+        business_quality=5,
+        business_quality_reason="fallback",
+        financial_health=5,
+        financial_health_reason="fallback",
+        valuation_fairness=5,
+        valuation_fairness_reason="fallback",
+        growth_prospect=5,
+        growth_prospect_reason="fallback",
+        risk_level="medium",
+        risk_factors=["LLM 失败"],
+        comparable_companies=[],
+        recommended_action="watch",
+        confidence="low",
+        reasoning="fallback",
+        evaluation_source="fallback",
+    )
+    repo.save_llm_evaluation("01081", fallback_eval, 50)
+
+    top = repo.get_active_ipos_for_digest()
+    pending = repo.get_ai_pending_ipos_for_digest()
+
+    assert top == []
+    assert pending[0]["stock_code"] == "01081"
+    assert "公司主营业务" in pending[0]["unknown_fields"]
+    assert "LLM 评审失败" in pending[0]["ai_review_note"]
+
+
+def test_reviewed_but_unqualified_ipo_is_pending_not_top():
+    from app.models import LLMEvaluation
+
+    _, repo = _make_app()
+    repo.upsert_ipo(
+        _ipo().model_copy(
+            update={
+                "stock_code": "02723",
+                "stock_name": "Deepzero",
+                "status": "subscription_open",
+                "business_overview": "Company provides test software.",
+                "subscription_close_date": date(2026, 6, 5),
+                "listing_date": date(2026, 6, 10),
+                "entry_fee_hkd": 3030.3,
+            }
+        )
+    )
+    skip_eval = LLMEvaluation(
+        business_quality=4,
+        business_quality_reason="业务规模较小",
+        financial_health=3,
+        financial_health_reason="盈利能力不足",
+        valuation_fairness=3,
+        valuation_fairness_reason="估值缺乏吸引力",
+        growth_prospect=4,
+        growth_prospect_reason="增长确定性不足",
+        risk_level="very_high",
+        risk_factors=["风险较高"],
+        comparable_companies=[],
+        recommended_action="skip",
+        confidence="high",
+        reasoning="测试",
+    )
+    repo.save_llm_evaluation("02723", skip_eval, 35)
+
+    assert repo.get_active_ipos_for_digest() == []
+    pending = repo.get_ai_pending_ipos_for_digest()
+    assert pending[0]["stock_code"] == "02723"
+    assert "AI 建议放弃" in pending[0]["top_exclusion_reasons"]
+    assert "AI 风险等级为极高" in pending[0]["top_exclusion_reasons"]
+
+
+def test_llm_composite_score_can_enable_notification():
+    init_db("sqlite:///:memory:")
+    repo = Repository()
+    app = SchedulerApp(
+        Settings(),
+        StrategyConfig(),
+        LLMService(FixedEvaluationProvider(score=10)),
+        repo,
+    )
+    ipo = _ipo().model_copy(update={"listing_date": date(2026, 6, 3)})
+    repo.upsert_ipo(ipo)
+
+    decision = app._evaluate_and_notify(ipo)
+
+    assert decision.score >= 60
+    assert decision.should_notify
+    assert decision.notification_key == "02616:new_ipo:discovered"
+
+
+def test_llm_composite_score_can_suppress_rule_notification():
+    from app.models import AllotmentResult
+
+    init_db("sqlite:///:memory:")
+    repo = Repository()
+    app = SchedulerApp(
+        Settings(),
+        StrategyConfig(),
+        LLMService(FixedEvaluationProvider(score=1)),
+        repo,
+    )
+    ipo = _ipo().model_copy(update={"listing_date": date(2026, 6, 3)})
+    allotment = AllotmentResult(
+        stock_code="02616",
+        public_subscription_times=100,
+        one_lot_success_rate=20,
+        clawback_ratio=50,
+        announcement_id=1,
+    )
+
+    decision = app._evaluate_and_notify(ipo, allotment=allotment)
+
+    assert decision.score < 60
+    assert not decision.should_notify
+    assert decision.notification_key is None
+
+
+def test_market_heat_counts_latest_score_per_ipo():
+    _, repo = _make_app()
+    repo.upsert_ipo(_ipo())
+    first = StrategyDecision(
+        stock_code="02616",
+        passed=True,
+        score=30,
+        level=1,
+        evaluated_at=datetime(2026, 5, 26, 10, tzinfo=timezone.utc),
+    )
+    second = first.model_copy(
+        update={
+            "score": 90,
+            "level": 4,
+            "evaluated_at": datetime(2026, 5, 26, 11, tzinfo=timezone.utc),
+        }
+    )
+
+    repo.save_strategy_score(first)
+    repo.save_strategy_score(second)
+
+    with patch("app.utils.time_utils.today_hk", return_value=date(2026, 5, 26)):
+        heat = repo.get_market_heat()
+
+    assert heat["recent_ipo_count_30d"] == 1
+    assert heat["avg_score_30d"] == 90
+    assert heat["high_score_count_30d"] == 1
 
 
 def test_allotment_collection_recalculates_and_notifies():

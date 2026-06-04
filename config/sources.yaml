@@ -32,10 +32,12 @@ sources:
     interval_minutes: 10
 
   grey_market:
-    # Disabled until a dedicated branch implements AAStocks dynamic quote retrieval.
-    enabled: false
+    enabled: true
+    type: html
+    url: "https://www.aastocks.com/tc/stocks/market/ipo/greymarket.aspx"
+    collect_mode: browser
+    interval_minutes: 5
+    timeout_seconds: 30
     sources:
       - name: "aastocks"
         url: "https://www.aastocks.com/tc/stocks/market/ipo/greymarket.aspx"
-    interval_minutes: 5
-    timeout_seconds: 20

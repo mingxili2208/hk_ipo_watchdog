@@ -217,3 +217,121 @@ def test_grey_market_only_parses_quote_table_by_headers():
     assert items[0]["offer_price"] == 0.25
     assert items[0]["change_percent"] == 32.8
     assert items[0]["turnover_hkd"] == 1200000.0
+
+
+def test_grey_market_skips_no_data_placeholder():
+    """当页面显示"供应商是日没有新股暗盘"时应返回空列表。"""
+    html = """
+    <table class="GMList-Container">
+      <tr><td>供應商是日沒有新股暗盤</td></tr>
+    </table>
+    <table>
+      <tr>
+        <th>公司名稱/代號</th><th>招股價</th><th>暗盤價</th>
+        <th>暗盤升跌</th><th>暗盤成交額</th>
+      </tr>
+      <tr><td>華曦達 00901.HK</td><td>0.25</td><td>0.332</td><td>+32.8%</td><td>1,200,000</td></tr>
+    </table>
+    """
+    collector = GreyMarketCollector()
+
+    items = collector.parse(RawFetchResult(url="https://example.test/grey", status_code=200, text=html))
+
+    # GMList-Container 被跳过，但第二个表格仍应被解析
+    assert len(items) == 1
+    assert items[0]["stock_code"] == "00901"
+
+
+def test_grey_market_skips_no_data_only_page():
+    """当页面只有"无数据"提示、没有报价表时返回空列表。"""
+    html = """
+    <table class="GMList-Container">
+      <tr><td>供應商是日沒有新股暗盤</td></tr>
+    </table>
+    <table>
+      <tr><th>公司名稱/代號</th><th>行業</th><th>定價</th></tr>
+      <tr><td>大金重工 01081.HK</td><td>環保</td><td>定價於06/03</td></tr>
+    </table>
+    """
+    collector = GreyMarketCollector()
+
+    items = collector.parse(RawFetchResult(url="https://example.test/grey", status_code=200, text=html))
+
+    assert items == []
+
+
+def test_grey_market_browser_mode_collects_with_mock_playwright(monkeypatch):
+    """browser 模式下应调用 Playwright 渲染并解析数据。"""
+    rendered_html = """
+    <table class="GMList-Container">
+      <tr>
+        <th>公司名稱/代號</th><th>招股價</th><th>暗盤價</th>
+        <th>暗盤升跌</th><th>暗盤成交額</th>
+      </tr>
+      <tr><td>華曦達 00901.HK</td><td>0.25</td><td>0.332</td><td>+32.8%</td><td>1,200,000</td></tr>
+    </table>
+    """
+
+    class MockBrowserManager:
+        def fetch_page(self, url, **kwargs):
+            return rendered_html
+
+    monkeypatch.setattr(
+        "app.collectors.grey_market.GreyMarketCollector._fetch_with_browser",
+        lambda self, url: RawFetchResult(url=url, status_code=200, text=rendered_html),
+    )
+
+    collector = GreyMarketCollector(
+        sources=[{"name": "aastocks", "url": "https://example.test/grey"}],
+        collect_mode="browser",
+    )
+    quotes = collector.collect(stock_codes=["00901"])
+
+    assert len(quotes) == 1
+    assert quotes[0].stock_code == "00901"
+    assert quotes[0].grey_price == 0.332
+    assert quotes[0].change_percent == 32.8
+    assert quotes[0].source == "aastocks"
+
+
+def test_grey_market_browser_mode_returns_empty_on_no_data(monkeypatch):
+    """browser 模式下如果页面无暗盘数据应返回空列表。"""
+    no_data_html = """
+    <table class="GMList-Container">
+      <tr><td>供應商是日沒有新股暗盤</td></tr>
+    </table>
+    """
+
+    monkeypatch.setattr(
+        "app.collectors.grey_market.GreyMarketCollector._fetch_with_browser",
+        lambda self, url: RawFetchResult(url=url, status_code=200, text=no_data_html),
+    )
+
+    collector = GreyMarketCollector(
+        sources=[{"name": "aastocks", "url": "https://example.test/grey"}],
+        collect_mode="browser",
+    )
+    quotes = collector.collect()
+
+    assert quotes == []
+
+
+def test_grey_market_collect_mode_passed_from_config(monkeypatch):
+    """collect_mode 应从配置正确传递到 collector。"""
+    called_with = {}
+
+    def mock_fetch(self, url):
+        called_with["mode"] = self.collect_mode
+        return RawFetchResult(url=url, status_code=200, text="<html></html>")
+
+    monkeypatch.setattr(
+        "app.collectors.grey_market.GreyMarketCollector._fetch_with_browser", mock_fetch
+    )
+
+    collector = GreyMarketCollector(
+        sources=[{"name": "test", "url": "https://example.test"}],
+        collect_mode="browser",
+    )
+    collector.collect()
+
+    assert called_with["mode"] == "browser"

@@ -181,3 +181,79 @@ class TestEvaluateIPO:
 
         assert first_decision.notification_key == second_decision.notification_key
         assert "down_0" in first_decision.notification_key
+
+
+class TestLLMScoring:
+    """LLM 结构化评分测试。"""
+
+    def test_llm_score_high_evaluation(self):
+        from app.models import LLMEvaluation
+        from app.strategy.scoring import calculate_llm_score
+
+        eval = LLMEvaluation(
+            business_quality=9,
+            financial_health=8,
+            valuation_fairness=8,
+            growth_prospect=9,
+            risk_level="low",
+            risk_factors=[],
+            comparable_companies=["公司A"],
+            recommended_action="subscribe",
+            confidence="high",
+            reasoning="优秀标的",
+        )
+        score = calculate_llm_score(eval)
+        assert score >= 80
+
+    def test_llm_score_low_evaluation(self):
+        from app.models import LLMEvaluation
+        from app.strategy.scoring import calculate_llm_score
+
+        eval = LLMEvaluation(
+            business_quality=2,
+            financial_health=3,
+            valuation_fairness=2,
+            growth_prospect=3,
+            risk_level="very_high",
+            risk_factors=["持续亏损", "客户集中"],
+            comparable_companies=[],
+            recommended_action="skip",
+            confidence="high",
+            reasoning="风险过高",
+        )
+        score = calculate_llm_score(eval)
+        assert score <= 25
+
+    def test_llm_score_low_confidence_shrinks_toward_neutral(self):
+        from app.models import LLMEvaluation
+        from app.strategy.scoring import calculate_llm_score
+
+        high_conf = LLMEvaluation(
+            business_quality=9, financial_health=9,
+            valuation_fairness=9, growth_prospect=9,
+            risk_level="low", risk_factors=[], comparable_companies=[],
+            recommended_action="subscribe", confidence="high", reasoning="",
+        )
+        low_conf = high_conf.model_copy(update={"confidence": "low"})
+
+        high_score = calculate_llm_score(high_conf)
+        low_score = calculate_llm_score(low_conf)
+
+        # 低置信度应收缩到中性区间
+        assert low_score < high_score
+        assert low_score > 50  # 仍高于中性
+
+    def test_composite_score_blends_rule_and_llm(self):
+        from app.strategy.scoring import calculate_composite_score
+
+        config = StrategyConfig()
+        # rule=40, llm=80, w=0.6 → 40*0.4 + 80*0.6 = 16 + 48 = 64
+        composite = calculate_composite_score(40, 80, config)
+        assert composite == 64
+
+    def test_composite_score_falls_back_to_rule_when_no_llm(self):
+        from app.strategy.scoring import calculate_composite_score
+
+        config = StrategyConfig()
+        composite = calculate_composite_score(45, None, config)
+        assert composite == 45

@@ -1,4 +1,9 @@
-"""暗盘数据采集器。"""
+"""暗盘数据采集器。
+
+支持两种采集模式：
+- html: 静态 HTTP GET + BeautifulSoup 解析（适用于服务端渲染的页面）。
+- browser: Playwright 无头浏览器渲染 + 解析（适用于 WebSocket/AJAX 动态加载的页面）。
+"""
 
 from bs4 import BeautifulSoup
 from loguru import logger
@@ -9,22 +14,55 @@ from app.models import GreyMarketQuote
 from app.parsers.normalizer import normalize_hk_code, normalize_percent, normalize_money
 from app.utils.time_utils import now_hk
 
+# 暗盘页面中"无数据"的标识文本
+_NO_DATA_TEXTS = ["供應商是日沒有新股暗盤", "供应商是日没有新股暗盘"]
+
 
 class GreyMarketCollector(BaseCollector):
     """暗盘报价采集器。"""
 
     name = "grey_market"
 
-    def __init__(self, sources: list[dict] | None = None, timeout: int = 20):
+    def __init__(
+        self,
+        sources: list[dict] | None = None,
+        timeout: int = 20,
+        collect_mode: str = "html",
+    ):
         self.sources = sources or []
         self.timeout = timeout
+        self.collect_mode = collect_mode
 
     def fetch(self) -> RawFetchResult:
-        """暗盘可能有多个来源，这里返回第一个。"""
+        """抓取第一个数据源的原始页面。"""
         if not self.sources:
             raise FetchError("No grey market sources configured")
         url = self.sources[0].get("url", "")
+        if not url:
+            raise FetchError("Grey market source has no URL")
         return fetch_url(url, timeout=self.timeout)
+
+    def _fetch_with_browser(self, url: str) -> RawFetchResult:
+        """使用 Playwright 渲染页面，返回渲染后的 HTML。
+
+        浏览器实例由 BrowserManager 单例管理，此处只创建独立的
+        BrowserContext（页面隔离），结束后自动关闭 context，不会泄漏资源。
+        """
+        from app.utils.browser import BrowserManager
+
+        timeout_ms = self.timeout * 1000
+        # 等待 GMList-Container 出现 + 额外 3s 让 WebSocket 数据渲染
+        html = BrowserManager().fetch_page(
+            url,
+            wait_selector="table.GMList-Container",
+            wait_ms=3000,
+            timeout_ms=timeout_ms,
+        )
+        return RawFetchResult(
+            url=url,
+            status_code=200,
+            text=html,
+        )
 
     def parse(self, raw: RawFetchResult) -> list[dict]:
         """按表头解析实际暗盘报价表；无暗盘报价时返回空列表。"""
@@ -35,6 +73,12 @@ class GreyMarketCollector(BaseCollector):
             rows = table.find_all("tr")
             if not rows:
                 continue
+
+            # 跳过"无数据"提示表
+            table_text = table.get_text(strip=True)
+            if any(no_data in table_text for no_data in _NO_DATA_TEXTS):
+                continue
+
             header = [cell.get_text(" ", strip=True) for cell in rows[0].find_all(["th", "td"])]
             if not _has_header(header, ["暗盤價", "暗盘价"]) or not _has_header(header, ["升跌", "涨跌", "漲跌"]):
                 continue
@@ -65,7 +109,12 @@ class GreyMarketCollector(BaseCollector):
         return items
 
     def collect(self, stock_codes: list[str] | None = None) -> list[GreyMarketQuote]:
-        """采集暗盘数据。"""
+        """采集暗盘数据。
+
+        根据 collect_mode 选择采集方式：
+        - browser: Playwright 渲染（用于 WebSocket 动态加载的页面）。
+        - html: 传统 HTTP GET（用于服务端渲染的页面）。
+        """
         quotes = []
         for src in self.sources:
             url = src.get("url", "")
@@ -74,8 +123,15 @@ class GreyMarketCollector(BaseCollector):
                 continue
 
             try:
-                raw = fetch_url(url, timeout=self.timeout)
+                if self.collect_mode == "browser":
+                    raw = self._fetch_with_browser(url)
+                else:
+                    raw = fetch_url(url, timeout=self.timeout)
+
                 dicts = self.parse(raw)
+
+                if not dicts:
+                    logger.debug(f"Grey market: no quote data from {src_name}")
 
                 for d in dicts:
                     code = d.get("stock_code", "")
@@ -95,7 +151,10 @@ class GreyMarketCollector(BaseCollector):
                     )
                     quotes.append(quote)
             except Exception as e:
-                logger.error(f"Grey market collect from {src_name} failed: {e}")
+                logger.error(
+                    f"Grey market collect from {src_name} "
+                    f"(mode={self.collect_mode}) failed: {e}"
+                )
                 continue
 
         return quotes

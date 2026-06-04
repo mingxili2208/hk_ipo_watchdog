@@ -28,3 +28,20 @@ notification:
     enabled: false
     send_key_env: SERVER_CHAN_SEND_KEY
     min_level: 3
+
+  digest_version_update:
+    enabled: true
+    version: "score-ai-review-v1.0"
+    date: "2026-06-04"
+    title: "评分版本更新说明"
+    highlights:
+      - "日报主评分切换为 AI 评委分 score-ai-review-v1.0；旧规则分不再作为日报评分口径。"
+      - "AI 评委分由四个 1-10 分维度换算为 0-100 分：商业模式 30%、财务健康 25%、定价合理 25%、增长前景 20%。"
+      - "每个维度必须展示分数与事实依据；依据缺失时会明确标注需补充招股书或人工复核。"
+      - "Top 榜只展示符合标准的 AI 评审股票；资料 unknown、AI 建议放弃或极高风险项目不进入 Top。"
+    details:
+      - "原始 AI 分计算：商业模式×3.0 + 财务健康×2.5 + 定价合理×2.5 + 增长前景×2.0。"
+      - "置信度会影响最终分：high 保持原分；medium 按 0.85 向 50 分收缩；low 按 0.70 向 50 分收缩。公式：50 + (原始分 - 50) × 置信度系数。"
+      - "Top 榜过滤条件：真实 AI 评审、非 fallback、AI 建议不为 skip、风险等级不为 very_high、关键字段完整且具备官方主营摘要。"
+      - "未入榜项目会进入 AI 评审待补充 / 未入榜板块，并列出 Unknown 字段、未入榜原因和 LLM 状态。"
+      - "版本说明模块由 notification.digest_version_update 配置控制，后续版本更新可直接替换本段配置。"

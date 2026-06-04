@@ -10,6 +10,35 @@ from app.llm.client import LLMService
 from app.models import IPOItem, AllotmentResult, GreyMarketQuote, StrategyDecision
 
 
+def _llm_evaluation_is_stale(evaluation, created_at) -> bool:
+    """判断缓存的 LLM 评估是否过期。"""
+    from datetime import datetime, timedelta, timezone
+
+    if any(
+        not getattr(evaluation, field, "").strip()
+        or "当前缺少可验证的事实依据" in getattr(evaluation, field, "")
+        for field in (
+            "business_quality_reason",
+            "financial_health_reason",
+            "valuation_fairness_reason",
+            "growth_prospect_reason",
+        )
+    ):
+        return True
+
+    if created_at is None:
+        return True
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+
+    ttl = (
+        timedelta(hours=6)
+        if evaluation.evaluation_source == "fallback"
+        else timedelta(hours=24)
+    )
+    return datetime.now(timezone.utc) - created_at >= ttl
+
+
 class SchedulerApp:
     """定时任务调度器。"""
 
@@ -177,9 +206,41 @@ class SchedulerApp:
     ) -> StrategyDecision:
         """评分当前事件，并在满足策略和去重规则时发送通知。"""
         from app.notifier.formatter import format_notification
-        from app.strategy.rule_engine import evaluate_ipo
+        from app.strategy.rule_engine import evaluate_ipo, finalize_notification_decision
+        from app.strategy.scoring import (
+            calculate_llm_score,
+        )
 
         decision = evaluate_ipo(ipo, self.strategy_config, allotment, grey)
+
+        # ── LLM 结构化评估（申购推荐阶段） ──
+        llm_eval = self._refresh_llm_evaluation_if_needed(ipo)
+
+        # ── 综合评分 ──
+        if llm_eval is not None:
+            llm_score = calculate_llm_score(llm_eval)
+            if llm_score != decision.score:
+                rule_score = decision.score
+                logger.info(
+                    f"AI judge score for {ipo.stock_code}: "
+                    f"rule={rule_score} ai={llm_score}"
+                )
+                from app.strategy.scoring import decide_alert_level
+
+                decision = decision.model_copy(
+                    update={
+                        "score": llm_score,
+                        "level": decide_alert_level(llm_score, self.strategy_config),
+                        "score_breakdown": [
+                            f"AI 评委分: {llm_score}/100",
+                            f"规则分仅作参考: {rule_score}/100",
+                        ],
+                    }
+                )
+                decision = finalize_notification_decision(
+                    decision, ipo, self.strategy_config, allotment, grey
+                )
+
         self.repo.save_strategy_score(decision)
         if not decision.should_notify or not decision.notification_key:
             return decision
@@ -188,7 +249,7 @@ class SchedulerApp:
 
         summary = self.llm_service.summarize_ipo_alert(ipo, decision, allotment, grey)
         self.repo.save_llm_summary(ipo.stock_code, decision.notification_key, summary)
-        title, body = format_notification(summary, decision, ipo)
+        title, body = format_notification(summary, decision, ipo, llm_eval=llm_eval)
         self._send_notification(
             title=title,
             body=body,
@@ -198,6 +259,110 @@ class SchedulerApp:
             notification_type=decision.notification_type,
         )
         return decision
+
+    def _refresh_llm_evaluation_if_needed(
+        self, ipo: IPOItem, force: bool = False
+    ) -> "LLMEvaluation | None":
+        """按状态和过期策略刷新 LLM 申购评估。"""
+        if ipo.status not in (
+            "planned",
+            "hearing_passed",
+            "subscription_open",
+            "subscription_closed",
+            "allotment_result_published",
+            "grey_market_trading",
+        ):
+            return None
+
+        latest = self.repo.get_latest_llm_evaluation_with_meta(ipo.stock_code)
+        if latest and not force:
+            evaluation, created_at = latest
+            if not _llm_evaluation_is_stale(evaluation, created_at):
+                return evaluation
+
+        try:
+            from app.strategy.scoring import calculate_llm_score
+
+            financials = self._extract_prospectus_financials(ipo)
+            sponsor_stats = self._get_sponsor_stats(ipo)
+            market_heat_data = self._get_market_heat()
+
+            evaluation = self.llm_service.evaluate_ipo_enriched(
+                ipo,
+                financials=financials,
+                sponsor_stats=sponsor_stats,
+                market_heat=market_heat_data,
+            )
+            llm_score = calculate_llm_score(evaluation)
+            self.repo.save_llm_evaluation(ipo.stock_code, evaluation, llm_score)
+            logger.info(
+                f"LLM evaluation refreshed for {ipo.stock_code}: "
+                f"score={llm_score}, action={evaluation.recommended_action}, "
+                f"source={evaluation.evaluation_source}"
+            )
+            return evaluation
+        except Exception as e:
+            logger.warning(f"LLM evaluation failed for {ipo.stock_code}: {e}")
+            return latest[0] if latest else None
+
+    def _extract_prospectus_financials(
+        self, ipo: IPOItem
+    ) -> "ProspectusFinancials | None":
+        """尝试从招股书提取财务数据。失败时返回 None。"""
+        official = (ipo.raw_sources or {}).get("hkex_new_listing") or {}
+        prospectus_url = official.get("prospectus_url")
+        if not prospectus_url:
+            return None
+
+        try:
+            from app.collectors.hkex_new_listing import HKEXNewListingCollector
+
+            source_settings = self.settings.sources.hkex_new_listing
+            collector = HKEXNewListingCollector(
+                timeout=source_settings.timeout_seconds
+            )
+            text = collector._fetch_document_text(prospectus_url)
+            if not text or len(text) < 200:
+                return None
+
+            financials = self.llm_service.extract_financials(text)
+            if financials.revenue_hkd_million is not None:
+                logger.info(
+                    f"Prospectus financials extracted for {ipo.stock_code}: "
+                    f"revenue={financials.revenue_hkd_million}M"
+                )
+            return financials
+        except Exception as e:
+            logger.debug(
+                f"Prospectus financial extraction failed for "
+                f"{ipo.stock_code}: {e}"
+            )
+            return None
+
+    def _get_sponsor_stats(self, ipo: IPOItem) -> "SponsorStats | None":
+        """获取保荐人历史表现统计。取第一个保荐人的数据。"""
+        if not ipo.sponsors:
+            return None
+        try:
+            stats = self.repo.get_sponsor_stats(ipo.sponsors[0])
+            if stats:
+                from app.models import SponsorStats
+
+                return SponsorStats(**stats)
+        except Exception as e:
+            logger.debug(f"Sponsor stats lookup failed: {e}")
+        return None
+
+    def _get_market_heat(self) -> "MarketHeat | None":
+        """获取近期 IPO 市场热度指标。"""
+        try:
+            data = self.repo.get_market_heat()
+            from app.models import MarketHeat
+
+            return MarketHeat(**data)
+        except Exception as e:
+            logger.debug(f"Market heat lookup failed: {e}")
+            return None
 
     def _enrich_business_overview(self, ipo: IPOItem) -> IPOItem:
         """对缺失主营摘要的 IPO 从官方章程补充一次短概览。"""
@@ -398,13 +563,27 @@ class SchedulerApp:
                 else daily_key
             )
 
+            self._refresh_digest_ai_evaluations()
             events = self._attach_digest_scores(self.repo.get_today_events())
-            follow_ups = self.repo.get_ipo_follow_ups_for_digest()
-            summary = self.llm_service.summarize_daily_digest(events + follow_ups)
+            follow_ups = self._attach_follow_up_ai_evaluations(
+                self.repo.get_ipo_follow_ups_for_digest()
+            )
+            active_evaluations = self.repo.get_active_ipos_for_digest()
+            pending_evaluations = self.repo.get_ai_pending_ipos_for_digest()
+            summary = self.llm_service.summarize_daily_digest(
+                events + follow_ups + active_evaluations + pending_evaluations
+            )
             self.repo.save_llm_summary(None, notif_key, summary)
 
             from app.notifier.formatter import format_daily_digest
-            title, body = format_daily_digest(summary, events, follow_ups)
+            title, body = format_daily_digest(
+                summary,
+                events,
+                follow_ups,
+                active_evaluations,
+                pending_evaluations,
+                self.settings.notification.digest_version_update.model_dump(mode="json"),
+            )
             if resend:
                 title = f"[补发] {title}"
                 body = f"补发说明: 本邮件为 {event_key} 日报的更新补发版本。\n\n{body}"
@@ -422,11 +601,44 @@ class SchedulerApp:
         except Exception as e:
             logger.error(f"Job: send_daily_digest failed: {e}")
 
+    def job_refresh_llm_evaluations(self, force: bool = False) -> None:
+        """刷新活跃 IPO 的 LLM 申购评估。"""
+        logger.info("Job: refresh_llm_evaluations started")
+        try:
+            refreshed = 0
+            skipped = 0
+            for ipo in self.repo.get_active_ipos():
+                if ipo.status not in (
+                    "planned",
+                    "hearing_passed",
+                    "subscription_open",
+                    "subscription_closed",
+                    "allotment_result_published",
+                    "grey_market_trading",
+                ):
+                    skipped += 1
+                    continue
+                before = self.repo.get_latest_llm_evaluation_with_meta(ipo.stock_code)
+                evaluation = self._refresh_llm_evaluation_if_needed(ipo, force=force)
+                after = self.repo.get_latest_llm_evaluation_with_meta(ipo.stock_code)
+                if evaluation and after and (not before or after[1] != before[1]):
+                    refreshed += 1
+                else:
+                    skipped += 1
+            logger.info(
+                f"Job: refresh_llm_evaluations done, "
+                f"{refreshed} refreshed, {skipped} skipped"
+            )
+        except Exception as e:
+            logger.error(f"Job: refresh_llm_evaluations failed: {e}")
+
     def _attach_digest_scores(self, events: list[dict]) -> list[dict]:
-        """用日报生成时的最新入库数据为事件补充策略评分。"""
-        from app.strategy.rule_engine import evaluate_ipo
+        """仅保留已完成真实 AI 评审的日报事件，并附 AI 评委分。"""
+        from datetime import datetime
+        from app.strategy.scoring import calculate_llm_score, decide_alert_level
 
         decisions: dict[str, StrategyDecision] = {}
+        filtered_events = []
         for event in events:
             stock_code = event.get("stock_code")
             if not stock_code:
@@ -436,18 +648,57 @@ class SchedulerApp:
                 ipo = self.repo.get_ipo_by_code(stock_code)
                 if not ipo:
                     continue
-                decision = evaluate_ipo(
-                    ipo,
-                    self.strategy_config,
-                    self.repo.get_latest_allotment(stock_code),
-                    self.repo.get_latest_grey_quote(stock_code),
+                llm_eval = self._refresh_llm_evaluation_if_needed(ipo)
+                if not llm_eval or llm_eval.evaluation_source == "fallback":
+                    continue
+                ai_score = calculate_llm_score(llm_eval)
+                decision = StrategyDecision(
+                    stock_code=stock_code,
+                    passed=True,
+                    score=ai_score,
+                    level=decide_alert_level(ai_score, self.strategy_config),
+                    score_breakdown=[
+                        f"AI 评委分: {ai_score}/100",
+                        "日报主评分采用 AI 评审体系",
+                    ],
+                    evaluated_at=datetime.now(),
                 )
                 self.repo.save_strategy_score(decision)
                 decisions[stock_code] = decision
             score_payload = decision.model_dump(mode="json")
-            score_payload["push_score_threshold"] = self.strategy_config.alerts.only_push_score_above
+            score_payload["score_source"] = "ai_judge"
             event["strategy_score"] = score_payload
-        return events
+            latest_eval = self.repo.get_latest_llm_evaluation(stock_code)
+            if latest_eval:
+                event["llm_evaluation"] = latest_eval.model_dump(mode="json")
+            filtered_events.append(event)
+        return filtered_events
+
+    def _attach_follow_up_ai_evaluations(self, follow_ups: list[dict]) -> list[dict]:
+        """仅保留已完成真实 AI 评审的持续跟踪项。"""
+        from app.strategy.scoring import calculate_llm_score
+
+        enriched = []
+        for item in follow_ups:
+            stock_code = item.get("stock_code")
+            if not stock_code:
+                continue
+            ipo = self.repo.get_ipo_by_code(stock_code)
+            if not ipo:
+                continue
+            llm_eval = self._refresh_llm_evaluation_if_needed(ipo)
+            if not llm_eval or llm_eval.evaluation_source == "fallback":
+                continue
+            item["llm_evaluation"] = llm_eval.model_dump(mode="json")
+            item["ai_score"] = calculate_llm_score(llm_eval)
+            item["company_overview"] = ipo.business_overview or llm_eval.business_quality_reason
+            enriched.append(item)
+        return enriched
+
+    def _refresh_digest_ai_evaluations(self) -> None:
+        """日报生成前刷新所有活跃候选股票的 AI 评审。"""
+        for ipo in self.repo.get_active_ipos():
+            self._refresh_llm_evaluation_if_needed(ipo)
 
     def _collect_all_ipo_sources(self) -> list:
         """从所有启用的数据源采集 IPO 日历。"""
@@ -510,6 +761,7 @@ class SchedulerApp:
             collector = GreyMarketCollector(
                 sources=self.settings.sources.grey_market.sources,
                 timeout=self.settings.sources.grey_market.timeout_seconds,
+                collect_mode=self.settings.sources.grey_market.collect_mode,
             )
             return collector.collect(stock_codes)
         except Exception as e:
@@ -571,6 +823,21 @@ class SchedulerApp:
                 max_instances=1,
             )
 
+        if sched.llm_evaluation.enabled and sched.llm_evaluation.time:
+            from apscheduler.triggers.cron import CronTrigger
+
+            hour, minute = sched.llm_evaluation.time.split(":")
+            self.scheduler.add_job(
+                self.job_refresh_llm_evaluations,
+                CronTrigger(
+                    hour=int(hour),
+                    minute=int(minute),
+                    timezone=sched.llm_evaluation.timezone,
+                ),
+                id="refresh_llm_evaluations",
+                max_instances=1,
+            )
+
     def start(self) -> None:
         """启动调度器。"""
         self.setup_jobs()
@@ -579,3 +846,6 @@ class SchedulerApp:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):
             logger.info("Scheduler stopped")
+        finally:
+            from app.utils.browser import BrowserManager
+            BrowserManager.close_singleton()

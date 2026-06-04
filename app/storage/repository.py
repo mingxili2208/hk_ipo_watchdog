@@ -14,6 +14,7 @@ from app.models import (
     GreyMarketQuote,
     StrategyDecision,
     LLMSummary,
+    LLMEvaluation,
     UpsertResult,
 )
 from app.storage.db import get_session
@@ -25,6 +26,7 @@ from app.storage.models import (
     IPOEventORM,
     StrategyScoreORM,
     LLMSummaryORM,
+    LLMEvaluationORM,
     LLMUsageORM,
     NotificationORM,
 )
@@ -331,6 +333,237 @@ class Repository:
         self.session.commit()
         return orm.id
 
+    def save_llm_evaluation(
+        self, stock_code: str, evaluation: LLMEvaluation, llm_score: int
+    ) -> int:
+        """保存 LLM 结构化评估。"""
+        orm = LLMEvaluationORM(
+            stock_code=stock_code,
+            business_quality=evaluation.business_quality,
+            business_quality_reason=evaluation.business_quality_reason,
+            financial_health=evaluation.financial_health,
+            financial_health_reason=evaluation.financial_health_reason,
+            valuation_fairness=evaluation.valuation_fairness,
+            valuation_fairness_reason=evaluation.valuation_fairness_reason,
+            growth_prospect=evaluation.growth_prospect,
+            growth_prospect_reason=evaluation.growth_prospect_reason,
+            risk_level=evaluation.risk_level,
+            risk_factors_json=json.dumps(evaluation.risk_factors, ensure_ascii=False),
+            comparable_companies_json=json.dumps(
+                evaluation.comparable_companies, ensure_ascii=False
+            ),
+            recommended_action=evaluation.recommended_action,
+            confidence=evaluation.confidence,
+            reasoning=evaluation.reasoning,
+            evaluation_source=evaluation.evaluation_source,
+            llm_score=llm_score,
+        )
+        self.session.add(orm)
+        self.session.commit()
+        return orm.id
+
+    def get_latest_llm_evaluation(self, stock_code: str) -> LLMEvaluation | None:
+        """获取最新的 LLM 评估。"""
+        row = self._latest_llm_evaluation_row(stock_code)
+        if not row:
+            return None
+        return _llm_evaluation_from_orm(row)
+
+    def get_latest_llm_evaluation_with_meta(
+        self, stock_code: str
+    ) -> tuple[LLMEvaluation, datetime] | None:
+        """获取最新 LLM 评估及创建时间。"""
+        row = self._latest_llm_evaluation_row(stock_code)
+        if not row:
+            return None
+        return _llm_evaluation_from_orm(row), row.created_at
+
+    def _latest_llm_evaluation_row(self, stock_code: str) -> LLMEvaluationORM | None:
+        return (
+            self.session.query(LLMEvaluationORM)
+            .filter(LLMEvaluationORM.stock_code == stock_code)
+            .order_by(LLMEvaluationORM.created_at.desc())
+            .first()
+        )
+
+    def get_active_ipos_for_digest(self, limit: int = 10) -> list[dict]:
+        """获取 AI 评委分排名最高的活跃 IPO 日报展示快照。"""
+        items = self._active_ipo_digest_candidates(include_failed=False)
+        items = [item for item in items if item.get("ai_review_status") == "ranked"]
+        items.sort(key=_active_ipo_digest_sort_key, reverse=True)
+        for index, item in enumerate(items[:limit], start=1):
+            item["rank"] = index
+        return items[:limit]
+
+    def get_ai_pending_ipos_for_digest(self, limit: int = 10) -> list[dict]:
+        """获取没有有效 AI 评审但仍应在日报说明的 IPO。"""
+        items = self._active_ipo_digest_candidates(include_failed=True)
+        pending = [item for item in items if item.get("ai_review_status") != "ranked"]
+        pending.sort(key=_pending_ipo_digest_sort_key, reverse=True)
+        return pending[:limit]
+
+    def _active_ipo_digest_candidates(self, include_failed: bool) -> list[dict]:
+        rows = (
+            self.session.query(IPOItemORM)
+            .filter(IPOItemORM.status.notin_(["listed", "archived"]))
+            .order_by(IPOItemORM.listing_date.asc(), IPOItemORM.stock_code.asc())
+            .all()
+        )
+        items = []
+        for row in rows:
+            ipo = _orm_to_ipo(row)
+            if not _is_actionable_ipo_for_digest(ipo):
+                continue
+            llm_row = self._latest_llm_evaluation_row(ipo.stock_code)
+            llm_eval = _llm_evaluation_from_orm(llm_row) if llm_row else None
+            is_reviewed = bool(llm_row and llm_row.evaluation_source != "fallback")
+            exclusion_reasons = _top_exclusion_reasons(ipo, llm_eval) if is_reviewed else []
+            review_status = (
+                "ranked"
+                if is_reviewed and not exclusion_reasons
+                else ("not_ranked" if is_reviewed else "pending")
+            )
+            if not include_failed and not is_reviewed:
+                continue
+            item = {
+                "stock_code": ipo.stock_code,
+                "event_type": "active_ipo_evaluation",
+                "title": f"AI 关注榜: {ipo.stock_code} {ipo.stock_name or ''}",
+                "ipo": ipo.model_dump(
+                    mode="json",
+                    exclude={"raw_sources", "source_url", "created_at", "updated_at"},
+                    exclude_none=True,
+                ),
+                "company_overview": _company_overview_for_digest(ipo, llm_eval),
+                "ai_score": llm_row.llm_score if llm_row else None,
+                "ai_review_status": review_status,
+                "unknown_fields": _unknown_ipo_fields_for_digest(ipo),
+                "ai_review_note": _ai_review_note_for_digest(ipo, llm_row),
+                "top_exclusion_reasons": exclusion_reasons,
+            }
+            if llm_eval:
+                item["llm_evaluation"] = llm_eval.model_dump(mode="json")
+            items.append(item)
+        return items
+
+    def get_sponsor_stats(self, sponsor_name: str) -> dict | None:
+        """获取保荐人历史表现统计。
+
+        基于已评估过的 IPO 的 StrategyScore 计算平均分和高分比例。
+        """
+        # 找到所有包含该保荐人的 IPO
+        ipos = (
+            self.session.query(IPOItemORM)
+            .filter(IPOItemORM.sponsors_json.contains(f'"{sponsor_name}"'))
+            .all()
+        )
+        if not ipos:
+            return None
+
+        codes = [ipo.stock_code for ipo in ipos]
+        scores = (
+            self.session.query(StrategyScoreORM)
+            .filter(StrategyScoreORM.stock_code.in_(codes))
+            .all()
+        )
+        if not scores:
+            return None
+
+        latest_scores: dict[str, StrategyScoreORM] = {}
+        for score in scores:
+            existing = latest_scores.get(score.stock_code)
+            if existing is None or _is_newer_datetime(
+                score.evaluated_at, existing.evaluated_at
+            ):
+                latest_scores[score.stock_code] = score
+        score_values = [s.score for s in latest_scores.values() if s.score is not None]
+        if not score_values:
+            return None
+
+        # 获取 LLM 评分
+        llm_evals = (
+            self.session.query(LLMEvaluationORM)
+            .filter(LLMEvaluationORM.stock_code.in_(codes))
+            .all()
+        )
+        latest_llm: dict[str, LLMEvaluationORM] = {}
+        for evaluation in llm_evals:
+            existing = latest_llm.get(evaluation.stock_code)
+            if existing is None or _is_newer_datetime(
+                evaluation.created_at, existing.created_at
+            ):
+                latest_llm[evaluation.stock_code] = evaluation
+        llm_score_values = [
+            e.llm_score for e in latest_llm.values() if e.llm_score is not None
+        ]
+
+        avg_score = sum(score_values) / len(score_values)
+        avg_llm = (
+            sum(llm_score_values) / len(llm_score_values)
+            if llm_score_values
+            else 0
+        )
+        high_ratio = sum(1 for s in score_values if s >= 60) / len(score_values)
+
+        return {
+            "sponsor_name": sponsor_name,
+            "total_ipo_count": len(codes),
+            "avg_score": round(avg_score, 1),
+            "avg_llm_score": round(avg_llm, 1),
+            "high_score_ratio": round(high_ratio, 2),
+        }
+
+    def get_market_heat(self) -> dict:
+        """获取近期 IPO 市场热度指标。"""
+        from datetime import timedelta
+        from app.utils.time_utils import today_hk
+
+        today = today_hk()
+        cutoff = today - timedelta(days=30)
+
+        # 近 30 天有评分的 IPO（每只 IPO 只取最新一次评分）
+        recent_scores = (
+            self.session.query(StrategyScoreORM)
+            .filter(
+                StrategyScoreORM.evaluated_at >= datetime.combine(
+                    cutoff, datetime.min.time()
+                )
+            )
+            .all()
+        )
+
+        active_count = (
+            self.session.query(IPOItemORM)
+            .filter(IPOItemORM.status.notin_(["listed", "archived"]))
+            .count()
+        )
+
+        if not recent_scores:
+            return {
+                "recent_ipo_count_30d": 0,
+                "avg_score_30d": 0,
+                "high_score_count_30d": 0,
+                "active_ipo_count": active_count,
+            }
+
+        latest_scores: dict[str, StrategyScoreORM] = {}
+        for score in recent_scores:
+            existing = latest_scores.get(score.stock_code)
+            if existing is None or _is_newer_datetime(
+                score.evaluated_at, existing.evaluated_at
+            ):
+                latest_scores[score.stock_code] = score
+        score_values = [s.score for s in latest_scores.values() if s.score is not None]
+        avg = sum(score_values) / len(score_values) if score_values else 0
+        high = sum(1 for s in score_values if s >= 60)
+
+        return {
+            "recent_ipo_count_30d": len(score_values),
+            "avg_score_30d": round(avg, 1),
+            "high_score_count_30d": high,
+            "active_ipo_count": active_count,
+        }
+
     def record_llm_usage(self, purpose: str, usage: dict) -> int:
         """保存一次由供应商响应返回的 LLM token 用量。"""
         orm = LLMUsageORM(
@@ -505,6 +738,10 @@ class Repository:
                     grey = self.get_latest_grey_quote(r.stock_code)
                     if grey:
                         event["grey_market"] = grey.model_dump(mode="json", exclude_none=True)
+                # 附带 LLM 评估数据（如果有）
+                llm_eval = self.get_latest_llm_evaluation(r.stock_code)
+                if llm_eval:
+                    event["llm_evaluation"] = llm_eval.model_dump(mode="json")
             result.append(event)
         return result
 
@@ -619,6 +856,174 @@ def _orm_to_ipo(orm: IPOItemORM) -> IPOItem:
         created_at=orm.created_at,
         updated_at=orm.updated_at,
     )
+
+
+def _llm_evaluation_from_orm(row: LLMEvaluationORM) -> LLMEvaluation:
+    """ORM 转 LLMEvaluation。"""
+    return LLMEvaluation(
+        business_quality=row.business_quality or 5,
+        business_quality_reason=_reason_or_missing(row.business_quality_reason),
+        financial_health=row.financial_health or 5,
+        financial_health_reason=_reason_or_missing(row.financial_health_reason),
+        valuation_fairness=row.valuation_fairness or 5,
+        valuation_fairness_reason=_reason_or_missing(row.valuation_fairness_reason),
+        growth_prospect=row.growth_prospect or 5,
+        growth_prospect_reason=_reason_or_missing(row.growth_prospect_reason),
+        risk_level=row.risk_level or "medium",
+        risk_factors=json.loads(row.risk_factors_json or "[]"),
+        comparable_companies=json.loads(row.comparable_companies_json or "[]"),
+        recommended_action=row.recommended_action or "watch",
+        confidence=row.confidence or "low",
+        reasoning=row.reasoning or "",
+        evaluation_source=row.evaluation_source or "llm",
+    )
+
+
+def _reason_or_missing(value: str | None) -> str:
+    if value and value.strip():
+        return value
+    return "当前缺少可验证的事实依据，需补充招股书或人工复核。"
+
+
+def _is_actionable_ipo_for_digest(ipo: IPOItem) -> bool:
+    """过滤债券、权证、供股权等未进入 IPO 生命周期的噪音记录。"""
+    actionable_statuses = {
+        "planned",
+        "hearing_passed",
+        "subscription_open",
+        "subscription_closed",
+        "allotment_result_published",
+        "grey_market_trading",
+    }
+    if ipo.status in actionable_statuses:
+        return True
+    return bool(
+        ipo.subscription_start_date
+        or ipo.subscription_close_date
+        or ipo.listing_date
+        or ipo.business_overview
+    )
+
+
+def _company_overview_for_digest(
+    ipo: IPOItem, evaluation: LLMEvaluation | None
+) -> str:
+    """优先使用官方章程摘要；缺失时给出可核查的评估摘录或缺失提示。"""
+    if ipo.business_overview:
+        return ipo.business_overview
+    if evaluation and evaluation.business_quality_reason:
+        return f"官方主营摘要缺失；AI 可核查业务线索: {evaluation.business_quality_reason}"
+    return "暂无官方章程主营摘要；需等待招股书解析或人工补充。"
+
+
+def _unknown_ipo_fields_for_digest(ipo: IPOItem) -> list[str]:
+    fields = []
+    checks = {
+        "公司主营业务": ipo.business_overview,
+        "行业": ipo.industry,
+        "招股开始日": ipo.subscription_start_date,
+        "招股截止日": ipo.subscription_close_date,
+        "上市日": ipo.listing_date,
+        "发售价": ipo.offer_price_min or ipo.offer_price_max or ipo.final_offer_price,
+        "每手股数": ipo.lot_size,
+        "入场费": ipo.entry_fee_hkd,
+        "保荐人": ipo.sponsors,
+    }
+    for label, value in checks.items():
+        if value in (None, "", [], {}):
+            fields.append(label)
+    return fields
+
+
+def _ai_review_note_for_digest(
+    ipo: IPOItem, row: LLMEvaluationORM | None
+) -> str:
+    if row is None:
+        return "尚未取得有效 AI 评审结果。"
+    if row.evaluation_source == "fallback":
+        return "LLM 评审失败，当前仅有 fallback 结果；不作为 AI 评委分。"
+    if _unknown_ipo_fields_for_digest(ipo):
+        return "AI 已完成评审，但仍存在部分 unknown 字段。"
+    return "AI 已完成评审。"
+
+
+def _top_exclusion_reasons(
+    ipo: IPOItem, evaluation: LLMEvaluation | None
+) -> list[str]:
+    """AI Top 榜只保留信息足够且未被 AI 判定为不适合的股票。"""
+    reasons = []
+    unknown = set(_unknown_ipo_fields_for_digest(ipo))
+    critical_unknown = [
+        field
+        for field in ("公司主营业务", "招股截止日", "上市日", "入场费")
+        if field in unknown
+    ]
+    if critical_unknown:
+        reasons.append(f"关键字段 unknown: {'、'.join(critical_unknown)}")
+
+    if not ipo.business_overview:
+        reasons.append("缺少官方章程主营摘要")
+
+    if evaluation:
+        if evaluation.recommended_action == "skip":
+            reasons.append("AI 建议放弃")
+        if evaluation.risk_level == "very_high":
+            reasons.append("AI 风险等级为极高")
+    else:
+        reasons.append("尚无真实 AI 评审")
+
+    return reasons
+
+
+def _active_ipo_digest_sort_key(item: dict) -> tuple:
+    ipo = item.get("ipo") or {}
+    score = item.get("ai_score")
+    has_score = score is not None
+    has_overview = bool(
+        ipo.get("business_overview")
+        or (item.get("company_overview") and "暂无官方" not in item["company_overview"])
+    )
+    status_rank = {
+        "subscription_open": 5,
+        "hearing_passed": 4,
+        "planned": 3,
+        "subscription_closed": 2,
+        "allotment_result_published": 1,
+        "grey_market_trading": 1,
+    }.get(ipo.get("status"), 0)
+    return (
+        1 if has_score else 0,
+        score or -1,
+        1 if has_overview else 0,
+        status_rank,
+    )
+
+
+def _pending_ipo_digest_sort_key(item: dict) -> tuple:
+    ipo = item.get("ipo") or {}
+    status_rank = {
+        "subscription_open": 5,
+        "hearing_passed": 4,
+        "planned": 3,
+        "subscription_closed": 2,
+        "allotment_result_published": 1,
+        "grey_market_trading": 1,
+    }.get(ipo.get("status"), 0)
+    known_count = 9 - len(item.get("unknown_fields") or [])
+    return (status_rank, known_count)
+
+
+def _is_newer_datetime(left: datetime | None, right: datetime | None) -> bool:
+    """比较可能缺失或时区不一致的数据库时间戳。"""
+    return _datetime_sort_value(left) > _datetime_sort_value(right)
+
+
+def _datetime_sort_value(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _str_to_date(val: str | None) -> date | None:

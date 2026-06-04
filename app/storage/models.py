@@ -165,6 +165,30 @@ class LLMSummaryORM(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class LLMEvaluationORM(Base):
+    __tablename__ = "llm_evaluations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(Text, nullable=False)
+    business_quality = Column(Integer)
+    business_quality_reason = Column(Text)
+    financial_health = Column(Integer)
+    financial_health_reason = Column(Text)
+    valuation_fairness = Column(Integer)
+    valuation_fairness_reason = Column(Text)
+    growth_prospect = Column(Integer)
+    growth_prospect_reason = Column(Text)
+    risk_level = Column(Text)
+    risk_factors_json = Column(Text, default="[]")
+    comparable_companies_json = Column(Text, default="[]")
+    recommended_action = Column(Text)
+    confidence = Column(Text)
+    reasoning = Column(Text)
+    evaluation_source = Column(Text, default="llm")
+    llm_score = Column(Integer)
+    created_at = Column(DateTime, default=_now)
+
+
 class LLMUsageORM(Base):
     __tablename__ = "llm_usage"
 

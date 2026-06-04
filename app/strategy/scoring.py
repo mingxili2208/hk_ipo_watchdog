@@ -1,6 +1,12 @@
-"""策略评分模块。"""
+"""策略评分模块。
 
-from app.models import IPOItem, AllotmentResult, GreyMarketQuote
+两阶段评分架构：
+- 规则评分 (calculate_score): 基于硬阈值的传统评分，所有阶段可用。
+- LLM 评分 (calculate_llm_score): 基于 LLM 结构化评估，招股阶段可用。
+- 综合评分 (calculate_composite_score): 加权组合，用于最终决策。
+"""
+
+from app.models import IPOItem, AllotmentResult, GreyMarketQuote, LLMEvaluation
 from app.strategy.config_loader import StrategyConfig
 
 
@@ -306,3 +312,52 @@ def collect_risk_flags(
         flags.append("缺少暗盘数据")
 
     return flags
+
+
+# ── LLM 评估评分 ──────────────────────────────────────────────
+
+
+def calculate_llm_score(evaluation: LLMEvaluation) -> int:
+    """将 LLM 结构化评估转换为 0-100 分。
+
+    权重分配：
+    - business_quality: 30%（商业模式是长期价值的核心）
+    - financial_health: 25%（财务健康是风险控制的关键）
+    - valuation_fairness: 25%（定价合理性直接决定打新收益）
+    - growth_prospect: 20%（增长前景影响上市后表现）
+    """
+    raw = (
+        evaluation.business_quality * 3.0   # 1-10 → 3-30
+        + evaluation.financial_health * 2.5  # 1-10 → 2.5-25
+        + evaluation.valuation_fairness * 2.5  # 1-10 → 2.5-25
+        + evaluation.growth_prospect * 2.0   # 1-10 → 2-20
+    )  # 总分范围: 10-100
+
+    # confidence 折扣：低置信度时收缩到中性区间
+    confidence_factor = {
+        "high": 1.0,
+        "medium": 0.85,
+        "low": 0.7,
+    }.get(evaluation.confidence, 0.7)
+
+    # 以 50 为中心收缩，避免低置信度时分数过于极端
+    adjusted = 50 + (raw - 50) * confidence_factor
+    return max(0, min(100, int(adjusted)))
+
+
+def calculate_composite_score(
+    rule_score: int,
+    llm_score: int | None,
+    config: StrategyConfig,
+) -> int:
+    """综合评分 = 规则评分 × (1-w) + LLM评分 × w。
+
+    当 LLM 评分不可用时，退化为纯规则评分。
+    权重由 config.scoring.llm_weight 控制（默认 0.6）。
+    """
+    if llm_score is None:
+        return rule_score
+
+    w = getattr(config.scoring, "llm_weight", 0.6)
+    composite = rule_score * (1 - w) + llm_score * w
+    return max(0, min(100, int(composite)))

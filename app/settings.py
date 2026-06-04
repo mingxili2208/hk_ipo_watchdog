@@ -53,6 +53,15 @@ class ServerChanSettings(BaseModel):
     min_level: int = 3
 
 
+class DigestVersionUpdateSettings(BaseModel):
+    enabled: bool = False
+    version: str | None = None
+    date: str | None = None
+    title: str = "版本更新说明"
+    highlights: list[str] = []
+    details: list[str] = []
+
+
 class QuietHoursSettings(BaseModel):
     enabled: bool = False
     start: str = "23:30"
@@ -65,6 +74,7 @@ class NotificationSettings(BaseModel):
     email: EmailSettings = EmailSettings()
     bark: BarkSettings = BarkSettings()
     server_chan: ServerChanSettings = ServerChanSettings()
+    digest_version_update: DigestVersionUpdateSettings = DigestVersionUpdateSettings()
 
 
 class RecipientsSettings(BaseModel):
@@ -92,6 +102,11 @@ class ScheduleSettings(BaseModel):
         window_end="18:30",
         weekdays_only=True,
     )
+    llm_evaluation: ScheduleItemSettings = ScheduleItemSettings(
+        enabled=True,
+        time="20:30",
+        timezone="Asia/Hong_Kong",
+    )
     daily_digest: ScheduleItemSettings = ScheduleItemSettings(time="21:30")
 
 
@@ -106,6 +121,7 @@ class SourceConfig(BaseModel):
     sources: list[dict[str, Any]] = []
     host: str | None = None
     port: int | None = None
+    collect_mode: str = "html"
 
 
 class SourcesSettings(BaseModel):
@@ -117,7 +133,7 @@ class SourcesSettings(BaseModel):
     )
     aastocks_ipo: SourceConfig = SourceConfig()
     futu_ipo: SourceConfig = SourceConfig(enabled=False, type="api")
-    grey_market: SourceConfig = SourceConfig(enabled=False)
+    grey_market: SourceConfig = SourceConfig(enabled=False, collect_mode="browser")
 
 
 class Settings(BaseModel):

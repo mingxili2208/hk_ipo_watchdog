@@ -13,13 +13,19 @@ schedule:
     interval_minutes: 5
 
   grey_market:
-    # Disabled: AAStocks HTML contains quote placeholders; live values need dynamic retrieval.
-    enabled: false
+    # 暗盘采集：使用 Playwright 渲染 AAStocks 动态页面
+    enabled: true
     interval_minutes: 5
     timezone: "Asia/Hong_Kong"
     window_start: "16:15"
     window_end: "18:30"
     weekdays_only: true
+
+  llm_evaluation:
+    # 日报前刷新活跃 IPO 的申购期 AI 评估
+    enabled: true
+    time: "20:30"
+    timezone: "Asia/Hong_Kong"
 
   daily_digest:
     enabled: true

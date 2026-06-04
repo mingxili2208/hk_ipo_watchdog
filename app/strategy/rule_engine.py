@@ -73,7 +73,30 @@ def evaluate_ipo(
     if not ipo.lot_size:
         missing.append("lot_size")
 
-    # 6. 是否需要推送
+    decision = StrategyDecision(
+        stock_code=ipo.stock_code,
+        passed=filter_result.passed,
+        score=score,
+        level=level,
+        matched_rules=matched_rules,
+        trigger_reasons=trigger_reasons,
+        risk_flags=risk_flags,
+        missing_fields=missing,
+        score_breakdown=score_breakdown,
+        evaluated_at=datetime.now(),
+    )
+
+    return finalize_notification_decision(decision, ipo, config, allotment, grey)
+
+
+def finalize_notification_decision(
+    decision: StrategyDecision,
+    ipo: IPOItem,
+    config: StrategyConfig,
+    allotment: AllotmentResult | None = None,
+    grey: GreyMarketQuote | None = None,
+) -> StrategyDecision:
+    """根据当前最终分数补齐推送类型、等级、是否推送和去重 key。"""
     notification_type = _decide_notification_type(ipo, allotment, grey, config)
     downside_grey_alert = (
         notification_type == "grey_market_breakout"
@@ -81,18 +104,18 @@ def evaluate_ipo(
         and grey.change_percent is not None
         and grey.change_percent <= config.grey_market.alert_if_below_percent
     )
+    level = decision.level
     if downside_grey_alert:
         level = max(level, 3)
 
     should_notify = (
-        filter_result.passed
+        decision.passed
         and (
-            (score >= config.alerts.only_push_score_above and level >= 2)
+            (decision.score >= config.alerts.only_push_score_above and level >= 2)
             or downside_grey_alert
         )
     )
 
-    # 8. 推送 key
     notification_key = None
     if should_notify and notification_type:
         event_key = ipo.status or "status_update"
@@ -113,20 +136,13 @@ def evaluate_ipo(
 
         notification_key = make_notification_key(ipo.stock_code, notification_type, event_key)
 
-    return StrategyDecision(
-        stock_code=ipo.stock_code,
-        passed=filter_result.passed,
-        score=score,
-        level=level,
-        matched_rules=matched_rules,
-        trigger_reasons=trigger_reasons,
-        risk_flags=risk_flags,
-        missing_fields=missing,
-        score_breakdown=score_breakdown,
-        should_notify=should_notify,
-        notification_type=notification_type,
-        notification_key=notification_key,
-        evaluated_at=datetime.now(),
+    return decision.model_copy(
+        update={
+            "level": level,
+            "should_notify": should_notify,
+            "notification_type": notification_type,
+            "notification_key": notification_key,
+        }
     )
 
 
